@@ -9,6 +9,10 @@
 *.xls
 *.xlsx
 
+# SQLite databases
+
+*.db
+
 # Stata Data (keep .do)
 
 *.dta 
