@@ -7,10 +7,49 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+#### Using "here" to keep project directory as working directory
+#### NOTE: Rmarkdown will try to make the file it is inside the working directory, but "here" should fix it.
+
+library(here)
+library(tidyverse)
+
 ```
 
+
+# CPS Cleaning
+
+I am using IPUMS CPS downloads (see codebook in data file where original download is kept). 
+
+* Data set info:
+* IPUMS CPS
+* Time period: Bsic Monthly from 01-1990 to 12-2019
+
+I only want observations which were included in the earner study - the outgoing groups. This should replicate the NBER MORG files, giving me a large n sample of the population.
+
+I think that this code will just turn my raw files into a MORG data set. I will create a project specific markdown for my Qualifying Paper project.
 
 # Today's Notebook
 
 ## (07-21-2021)
+
+Goals for today:
+
+* Import CPS csv's
+* Extract only outgoing groups
+
+
+# Import
+
+## Import CSV
+
+```{r echo=FALSE, warning=FALSE}
+
+CPS_Master <- read_csv()
+
+
+```
+
+
+
 
