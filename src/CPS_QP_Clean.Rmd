@@ -13,6 +13,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 library(here)
 library(tidyverse)
+library(data.table)
 
 ```
 
@@ -36,7 +37,20 @@ I think that this code will just turn my raw files into a MORG data set. I will 
 Goals for today:
 
 * Import CPS csv's
+  * read_csv is very slow!
+  * I am going to use data.table instead: fread()
 * Extract only outgoing groups
+
+# SQLite
+
+Because loading the entire file into RAM is unwieldy, I am going to create an SQLite database, and draw from that.
+
+See: https://data.library.virginia.edu/creating-a-sqlite-database-for-use-with-r/
+
+I am going to write the code that I use here for reference.
+
+However, I am entering it in a command line utiilty located at: "C:\Users\Sam\Desktop\sqlite-tools-win32-x86-3360000\sqlite-tools-win32-x86-3360000"
+
 
 
 # Import
@@ -45,7 +59,7 @@ Goals for today:
 
 ```{r echo=FALSE, warning=FALSE}
 
-CPS_Master <- read_csv()
+CPS_Master <- fread(here("data/IPUMS_CPS/cps_00003.csv"))
 
 
 ```
