@@ -1,0 +1,3 @@
+I was going to use this file to specify types for each column, see: https://data.library.virginia.edu/creating-a-sqlite-database-for-use-with-r/
+
+But decided against it

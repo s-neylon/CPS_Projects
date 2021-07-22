@@ -14,6 +14,7 @@ knitr::opts_chunk$set(echo = TRUE)
 library(here)
 library(tidyverse)
 library(data.table)
+library(DBI)
 
 ```
 
@@ -39,9 +40,39 @@ Goals for today:
 * Import CPS csv's
   * read_csv is very slow!
   * I am going to use data.table instead: fread()
+  * NOPE - I am going to use an SQLite database
 * Extract only outgoing groups
 
+### Notes on SQLite
+
+Because the data file is so large, I decided to access it as an SQLite database, instead of loading it into memory.
+
+Information on this is below.
+
+*NOTE: In the future, when I understand SQL, I should rewrite the code, as I could more easily extract just the outgoing groups (which requires loading the database with "integer" columns) in SQL, and leave other stuff to R. For now, I will be doing it in dplyr.
+
+### Summary of 07-21
+
+Okay, it was a frustrating day, but I got a lot done!
+
+I set up a very cool SQLite thing so that I can use big-ish data sets!
+
+I need to figure out how to turn the monthly basic data I have into statistics. Don't forget - each month is its own survey! So the weights equal up to the total population.
+
+Also, groups are often interviewed in more than one year. 
+
+I may need the "MISH" variable (the month the household was in) so I can get the ORG months - they are surveyed for the earner survey on Month 4 and 8 (MISH = 4 | 8)
+
+
 # SQLite
+
+## SQLite Code
+
+### Create Database
+
+*!!! NOTE: Instead of using the below coding method (which imported every column as TEXT), I used "DB Browser for SQLite" which is on my computer, and did a good job of sorting between INTEGER and TEXT*
+
+*I DID NOT use the following code* 
 
 Because loading the entire file into RAM is unwieldy, I am going to create an SQLite database, and draw from that.
 
@@ -51,19 +82,82 @@ I am going to write the code that I use here for reference.
 
 However, I am entering it in a command line utiilty located at: "C:\Users\Sam\Desktop\sqlite-tools-win32-x86-3360000\sqlite-tools-win32-x86-3360000"
 
+CODE:
 
+.cd 'C:\Users\Sam\OneDrive - Cuny GradCenter\CUNY! (Cloud)\R\CPS_Master\CPS_Master\data\IPUMS_CPS'
 
-# Import
+.open cps_master.db
 
-## Import CSV
+.mode csv
 
-```{r echo=FALSE, warning=FALSE}
+.import IPUMS_CPS_ALL_07-2021.csv cpsALL
 
-CPS_Master <- fread(here("data/IPUMS_CPS/cps_00003.csv"))
+.schema
+*NOTE: I used .schema to make sure my columns were imported with good formats*
+Dang, it imported everything as TEXT. Well, I can just change it later with dplyr. The procedure for changing in SQLite seems tedious (details at: https://data.library.virginia.edu/creating-a-sqlite-database-for-use-with-r/)
 
+## RSQLite Code
+
+```{r eval=TRUE}
+
+# This code establishes a connection with my database
+# See: https://data.library.virginia.edu/creating-a-sqlite-database-for-use-with-r/
+
+con <- dbConnect(RSQLite::SQLite(), here("data/IPUMS_CPS/cps_master.db"))
+
+# This allows dplyr to use the connection like an object:
+
+cpsALL <- tbl(con, "cpsALL")
 
 ```
 
+# Query and Save
+
+Now that I have a SQLite database, I can extract only the data I need, create a grouped table of industries, which will be a much smaller file, and save that as a csv.
+
+## Filter rows
+
+I just want observations which are from the outgoing rotation groups.
+
+```{r eval=TRUE}
+
+# NOTE: I thought that filter() for just non-zero EARNWT would give me what I wanted, but it seems like no? Another way is to use MISH (month of survey for that household) and just use months 4 and 8, but I don't have that variable, so I will need to do another massive download!
+
+cpsORG <- cpsALL %>% 
+  filter(YEAR >= 2003)
+
+```
+
+## Creating Grouped Panel
+
+I am creating a panel data set, where each row is an Industry-Year. This means I will be grouping and summarizing the CPS data, and I need to pick the variables that I wish to include.
+
+### Test
+
+I am going to create employment counts as a test. This means adding up the EARNWT for each industry-year.
+
+```{r eval=TRUE}
+
+# NOTE: I am grouping by IND so I can compare with unionstats - for the real project I will be grouping by IND1990
+
+cpsGROUP <- group_by(cpsORG, IND, YEAR)
+cpsTEST <- summarise(cpsGROUP,
+          unionMEMB = sum(EARNWT[UNION==2], na.rm = TRUE)) %>% 
+  collect()
+
+```
+
+
+
+# Disconnect SQLite
+
+Run this code to disconnect from the database
+
+```{r eval=FALSE}
+
+dbDisconnect(con)
+
+```
 
 
 
