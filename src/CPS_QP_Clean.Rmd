@@ -33,6 +33,18 @@ I think that this code will just turn my raw files into a MORG data set. I will 
 
 # Today's Notebook
 
+## (07-22-2021)
+
+Going to try new format - Data Exploration! I will write notes and run things, and label my sections by date. Once I figure out what I am doing, I will move the final code to a new file.
+
+# Previous Notebooks
+
+## (07-22-2021)
+
+Back to figuring out the CPS!
+
+
+
 ## (07-21-2021)
 
 Goals for today:
@@ -111,44 +123,6 @@ cpsALL <- tbl(con, "cpsALL")
 
 ```
 
-# Query and Save
-
-Now that I have a SQLite database, I can extract only the data I need, create a grouped table of industries, which will be a much smaller file, and save that as a csv.
-
-## Filter rows
-
-I just want observations which are from the outgoing rotation groups.
-
-```{r eval=TRUE}
-
-# NOTE: I thought that filter() for just non-zero EARNWT would give me what I wanted, but it seems like no? Another way is to use MISH (month of survey for that household) and just use months 4 and 8, but I don't have that variable, so I will need to do another massive download!
-
-cpsORG <- cpsALL %>% 
-  filter(YEAR >= 2003)
-
-```
-
-## Creating Grouped Panel
-
-I am creating a panel data set, where each row is an Industry-Year. This means I will be grouping and summarizing the CPS data, and I need to pick the variables that I wish to include.
-
-### Test
-
-I am going to create employment counts as a test. This means adding up the EARNWT for each industry-year.
-
-```{r eval=TRUE}
-
-# NOTE: I am grouping by IND so I can compare with unionstats - for the real project I will be grouping by IND1990
-
-cpsGROUP <- group_by(cpsORG, IND, YEAR)
-cpsTEST <- summarise(cpsGROUP,
-          unionMEMB = sum(EARNWT[UNION==2], na.rm = TRUE)) %>% 
-  collect()
-
-```
-
-
-
 # Disconnect SQLite
 
 Run this code to disconnect from the database
@@ -159,5 +133,330 @@ dbDisconnect(con)
 
 ```
 
+# Previous Experiments
+
+## Query and Save
+
+Now that I have a SQLite database, I can extract only the data I need, create a grouped table of industries, which will be a much smaller file, and save that as a csv.
+
+### Filter rows
+
+I just want observations which are from the outgoing rotation groups.
+
+```{r eval=FALSE}
+
+# NOTE: I thought that filter() for just non-zero EARNWT would give me what I wanted, but it seems like no? Another way is to use MISH (month of survey for that household) and just use months 4 and 8, but I don't have that variable, so I will need to do another massive download!
+
+cpsORG <- cpsALL %>% 
+  filter(YEAR >= 2003)
+
+```
+
+### Creating Grouped Panel
+
+I am creating a panel data set, where each row is an Industry-Year. This means I will be grouping and summarizing the CPS data, and I need to pick the variables that I wish to include.
+
+#### Test
+
+I am going to create employment counts as a test. This means adding up the EARNWT for each industry-year.
+
+```{r eval=FALSE}
+
+# NOTE: I am grouping by IND so I can compare with unionstats - for the real project I will be grouping by IND1990
+
+cpsGROUP <- group_by(cpsORG, IND, YEAR, MONTH)
+cpsTEST <- summarise(cpsGROUP,
+          TotEMP = sum(WTFINL, na.rm = TRUE)) %>% 
+  collect()
+cpsTEST <- summarise(cpsTEST,
+                     avgEMP = mean(TotEMP)) %>% 
+  collect()
+
+```
 
 
+
+# Exploratory Notebook
+
+# (07-24-2021)
+
+I start by trying to figure out if I need to use a different kind of weighting with my industry coding, since it is not necessarily part of the outgoing earner study. The issue is, with the outgoing group, there is only one (I thinkg) observation per person per year. But there is an industry question every month... If industry is part of the basic, then I guess it should be weighted like a basic question?
+
+I need to see if there are zeroes for EARNWT or what the deal is.
+
+ELIGORG !!! It is an ORG eligibility flag! I don't need MISH ! https://cps.ipums.org/cps-action/variables/ELIGORG#description_section
+
+## ELIGORG filter
+
+I just want observations which are from the outgoing rotation groups.
+
+```{r eval=FALSE}
+
+# NOTE: Unlike other version of this above, here I am using ELIGORG !
+
+cpsORG <- cpsALL %>% 
+  filter(ELIGORG == 1 & YEAR >= 2003)
+
+```
+
+Now I'll try this again...
+
+```{r eval=FALSE}
+
+# NOTE: I am grouping by IND so I can compare with unionstats - for the real project I will be grouping by IND1990
+
+cpsGROUP <- group_by(cpsORG, IND, YEAR)
+
+cpsTEST <- summarise(cpsGROUP, 
+                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12)) %>% 
+  collect()
+
+```
+
+It worked!!!! I AM INVINCIBLE!!!!!!
+
+(I am getting the same numbers as unionstats)
+
+Now I will add (see above) the union info, and verify with unionstats, just to make sure it is working.
+
+```{r eval=FALSE}
+
+# NOTE: Unlike other version of this above, here I am using ELIGORG !
+
+cpsORG <- cpsALL %>% 
+  filter(ELIGORG == 1 & YEAR >= 2003) %>% 
+  mutate(unionMEM = if_else(UNION == 2, 1, 0))
+
+view(head(cpsORG, 100))
+
+```
+
+Looks good!
+
+```{r eval=FALSE}
+
+# NOTE: I am grouping by IND so I can compare with unionstats - for the real project I will be grouping by IND1990
+
+cpsGROUP <- group_by(cpsORG, IND, YEAR)
+
+cpsTEST <- summarise(cpsGROUP, 
+                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+                     unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12)) %>% 
+                       collect()
+
+```
+
+WORKED AGAIN!!!!
+
+Okay, now I am going to use IPUMS ind1990 variable instead! I won't be able to confirm it with unionstats, because it is defined differently.
+
+```{r eval=FALSE}
+
+cpsORG <- cpsALL %>% 
+  filter(ELIGORG == 1 & YEAR >= 2003) %>% 
+  mutate(unionMEM = if_else(UNION == 2, 1, 0))
+
+cpsGROUP <- group_by(cpsORG, IND1990, YEAR)
+
+cpsTEST <- summarise(cpsGROUP, 
+                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+                     unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12)) %>% 
+                       collect()
+
+
+```
+
+NOTE: Should I just go ahead and use all the years' data? I have this nice ind1990 variable? Let me export this, and see.
+
+```{r eval=FALSE}
+
+cpsORG <- cpsALL %>% 
+  filter(ELIGORG == 1) %>% 
+  mutate(unionMEM = if_else(UNION == 2, 1, 0))
+
+cpsGROUP <- group_by(cpsORG, IND1990, YEAR)
+
+cpsTEST <- summarise(cpsGROUP, 
+                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+                     unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12)) %>% 
+                       collect()
+
+write_csv(cpsTEST, "cpsTEST_07-24.csv")
+
+```
+
+I am analyzing with pivot table to see if there are significant breaks in the employment data.
+
+Okay - pivot table showed a lot of goofy stuff going on in 2003 - so let's start there instead!
+
+### Final Version
+
+Final version going forward:
+
+```{r eval=FALSE}
+
+cpsORG <- cpsALL %>% 
+  filter(ELIGORG == 1 & YEAR >= 2003) %>% 
+  mutate(unionMEM = if_else(UNION == 2, 1, 0))
+
+cpsGROUP <- group_by(cpsORG, IND1990, YEAR)
+
+cpsTEST <- summarise(cpsGROUP, 
+                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+                     unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12)) %>% 
+                       collect()
+
+
+```
+
+## Creating Variables
+
+1. Unionization Rate
+2. Manager Ratio
+3. (Others in future)
+
+### unionization rate
+
+```{r eval=FALSE}
+
+cpsDATA <- cpsTEST %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100)
+
+
+```
+
+seems to have worked!
+
+### Manager Ratio
+
+I need to decide which occ codes to use. 
+
+IPUMS occ2010: https://cps.ipums.org/cps-action/variables/OCC2010#codes_section
+
+I am going to create 2 variables - one with both managers and supervisors, one with just managers.
+
+First, I need to take a look at the coding on the CPS:
+
+```{r eval=FALSE}
+
+view(head(cpsORG, 100))
+
+```
+
+occ2010 (along with all other codes) were converted to numeric - which is convenient now, but may mess me up later...
+
+For now, let's just take the number of top managers:
+
+0010 - Chief executives and legislators/public administration
+...
+0430 - Managers, nec (including Postmasters)
+
+```{r eval=FALSE}
+
+# Create ORG Microdata
+
+cpsORG <- cpsALL %>% 
+  filter(ELIGORG == 1 & YEAR >= 2003) %>% 
+  mutate(unionMEM = if_else(UNION == 2, 1, 0),
+         manager = if_else(OCC2010 >= 10 & OCC2010 <= 430, 1, 0))
+
+# view(head(cpsORG, 100))
+
+# Create Industry Panel
+
+cpsGROUP <- group_by(cpsORG, IND1990, YEAR)
+
+cpsTEST <- summarise(cpsGROUP, 
+                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+                     unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12),
+                     mgmtEMP = (sum(EARNWT * manager, na.rm = TRUE)/12)) %>% 
+                       collect()
+
+# Create New Variables
+
+cpsDATA <- cpsTEST %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100,
+         mgmtRATIO = (mgmtEMP / TotEMP)*100)
+
+
+```
+
+## Hourly Wages
+
+Going off EPI advice: https://www.epi.org/data/methodology/
+
+They use:
+
+* Hourly workers: Hourly wage (HOURWAGE)
+* Salary workers: weekly wage / hours worked
+  = EARNWEEK / UHRSWORKORG
+  filter: PAIDHOUR == 1 - this means that the worker is NOT paid by the hour
+  
+### hrWAGE2
+
+If PAIDHOUR = 2, they are hourly, so use the HOURWAGE
+If PAIDHOUR = 1, they are not hourly, so use EARNWEEK / UHRSWORKORG (NOPE! see note below, I must use UHRSWORK1)
+
+SET TO MISSING:
+
+HOURWAGE - 999.99 = NIU (not in universe)
+
+UHRSWORKORG - 999 = NIU, 998 = Don't Know
+
+#### NOTE! UHRSWORK1
+
+*NOTE* For the Earner study, salary workers are not asked usual hours (UHRSWORKORG). Instead, I will be using the Basic question: "Hours usually worked per week at main job" (UHRSWORK1). I should double check that this is what EPI and others do.
+
+#### hrWAGE2 code
+
+```{r eval=FALSE}
+
+# Create ORG Microdata
+
+cpsORG <- cpsALL %>% 
+  filter(ELIGORG == 1 & YEAR >= 2003) %>% 
+  mutate(unionMEM = if_else(UNION == 2, 1, 0),
+         manager = if_else(OCC2010 >= 10 & OCC2010 <= 430, 1, 0),
+         HOURWAGE2 = if_else(HOURWAGE != 999.99, HOURWAGE, NA_integer_),
+         hrWAGE2 = if_else(PAIDHOUR == 2, HOURWAGE2,
+                           if_else(PAIDHOUR == 1, (EARNWEEK / UHRSWORK1), NA_integer_))
+         )
+
+## view(head(cpsORG, 300))
+
+
+# Another way to check:
+
+## cpsCHECK <- slice_sample(cpsORG, n = 100) %>% collect()
+
+# Checking on the WKSWORKORG variable - since my "head" has a lot of "1" weeks worked...
+
+## wksCOUNT <- cpsORG %>% count(WKSWORKORG) %>% collect()
+
+# NOTE: Looks like it's all good - most people either work 52 weeks a year, or are 0 (not in universe)
+  
+
+# Create Industry Panel
+
+cpsGROUP <- group_by(cpsORG, IND1990, YEAR)
+
+cpsTEST <- summarise(cpsGROUP, 
+                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+                     unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12),
+                     mgmtEMP = (sum(EARNWT * manager, na.rm = TRUE)/12)) %>% 
+                       collect()
+
+# Create New Variables
+
+cpsDATA <- cpsTEST %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100,
+         mgmtRATIO = (mgmtEMP / TotEMP)*100)
+
+```
+
+
+
+
+## NOTES
+
+* Don't forget to leave out certain industries! Like Real Estate!
