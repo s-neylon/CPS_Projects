@@ -20,8 +20,6 @@ library(pacman)
 library(ggplot2)
 library(plm)
 
-library(ggeffects)
-library(interplot)
 
 ```
 
@@ -153,7 +151,280 @@ wtd.mean <- function (x, weights = NULL, normwt = "ignored", na.rm = TRUE) {
 
 ```
 
-# FIX interplot
+
+
+# CPS Cleaning
+
+(Taken from "CPS_QP_Clean.Rmd")
+
+## Notes on SQLite
+
+Because the data file is so large, I decided to access it as an SQLite database, instead of loading it into memory.
+
+Information on this is below.
+
+*NOTE: In the future, when I understand SQL, I should rewrite the code, as I could more easily extract just the outgoing groups (which requires loading the database with "integer" columns) in SQL, and leave other stuff to R. For now, I will be doing it in dplyr.
+
+## RSQLite Code
+
+```{r eval=TRUE}
+
+# This code establishes a connection with my database
+# See: https://data.library.virginia.edu/creating-a-sqlite-database-for-use-with-r/
+
+con <- dbConnect(RSQLite::SQLite(), here("data/IPUMS_CPS/cps_master.db"))
+
+# This allows dplyr to use the connection like an object:
+
+cpsALL <- tbl(con, "cpsALL")
+
+```
+
+# Disconnect SQLite
+
+Run this code to disconnect from the database
+
+```{r eval=FALSE}
+
+dbDisconnect(con)
+
+```
+
+
+### Data Set up
+
+Seems like Kristal 2017 uses 90/10 ratio as measure of inequality
+
+WARNING: EPI argue that you need to bin before using quantiles, since wages clump at certain values: https://www.epi.org/data/methodology/ (see "Wage Percentiles" section)
+
+```{r eval=FALSE}
+
+# Create ORG Microdata
+
+# list of variables:
+
+cpsORG <- cpsALL %>% 
+  filter(ELIGORG == 1 & YEAR >= 2003) %>% 
+  mutate(unionMEM = if_else(UNION == 2, 1, 0),
+         manager = if_else(OCC2010 >= 10 & OCC2010 <= 430, 1, 0),
+         HOURWAGE2 = if_else(HOURWAGE != 999.99, HOURWAGE, NA_integer_),
+         UHRSWORK1_2 = if_else(UHRSWORK1 == 999 | UHRSWORK1 == 997 | UHRSWORK1 == 0, NA_integer_, UHRSWORK1),
+         hrWAGE2 = if_else(PAIDHOUR == 2, HOURWAGE2,
+                           if_else(PAIDHOUR == 1, (EARNWEEK / UHRSWORK1_2), NA_integer_)),
+         mgmtWAGE = if_else(manager == 1, hrWAGE2, NA_integer_),
+         NONmgmtWAGE = if_else(manager == 0, hrWAGE2, NA_integer_),
+         ln_hrWAGE2 = log(hrWAGE2),
+         ln_mgmtWAGE = log(mgmtWAGE),
+         ln_NONmgmtWAGE = log(NONmgmtWAGE)
+         ) %>% 
+  select(ELIGORG, YEAR, unionMEM, manager, HOURWAGE2, UHRSWORK1_2, hrWAGE2, PAIDHOUR, IND1990, OCC2010, EARNWT, mgmtWAGE, NONmgmtWAGE, ln_hrWAGE2, ln_mgmtWAGE, ln_NONmgmtWAGE) %>% 
+  collect()
+
+## view(head(cpsORG, 300))
+
+
+# Another way to check:
+
+## cpsCHECK <- slice_sample(cpsORG, n = 100) %>% collect()
+
+# Checking on the WKSWORKORG variable - since my "head" has a lot of "1" weeks worked...
+
+## wksCOUNT <- cpsORG %>% count(WKSWORKORG) %>% collect()
+
+# NOTE: Looks like it's all good - most people either work 52 weeks a year, or are 0 (not in universe)
+  
+
+# Create Industry Panel
+
+cpsDATA <- group_by(cpsORG, IND1990, YEAR)
+
+cpsDATA <- summarise(cpsDATA, 
+                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+                     unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12),
+                     mgmtEMP = (sum(EARNWT * manager, na.rm = TRUE)/12), 
+                     avgWAGE = weighted.mean(hrWAGE2, EARNWT, na.rm = TRUE),
+                     NONmgmtAVG = weighted.mean(NONmgmtWAGE, EARNWT, na.rm = TRUE),
+                     mgmtAVG = weighted.mean(mgmtWAGE, EARNWT, na.rm = TRUE),
+                     ln_avgWAGE = weighted.mean(ln_hrWAGE2, EARNWT, na.rm = TRUE),
+                     ln_NONmgmtAVG = weighted.mean(ln_NONmgmtWAGE, EARNWT, na.rm = TRUE),
+                     ln_mgmtAVG = weighted.mean(ln_mgmtWAGE, EARNWT, na.rm = TRUE),
+                     var_wages = wtd.var(ln_hrWAGE2, EARNWT, na.rm = TRUE),
+                     Wage90 = wtd.quantile(hrWAGE2, EARNWT, probs = .9, na.rm = TRUE),
+                     Wage10 = wtd.quantile(hrWAGE2, EARNWT, probs = .1, na.rm = TRUE))
+
+cpsDATA <- ungroup(cpsDATA)
+
+# Drop big ole data set
+
+# rm(cpsORG)
+
+# Create Weights from average employment - take square root, then inner join
+
+cpsWEIGHT <- cpsDATA %>% 
+  group_by(IND1990) %>% 
+  summarise(avgEMP = mean(TotEMP))
+
+cpsWEIGHT <- cpsWEIGHT %>% 
+  mutate(empWEIGHT = sqrt(avgEMP))
+
+# Create New Variables
+
+
+
+cpsDATA <- cpsDATA %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100,
+         mgmtRATIO = (mgmtEMP / TotEMP)*100,
+         ratio90_10 = (Wage90 / Wage10),
+         log90_10 = log(Wage90 / Wage10))
+
+# Join weights
+
+cpsTEST <- cpsDATA %>% 
+  inner_join(cpsWEIGHT, by = "IND1990")
+
+```
+
+#### Filter Industries
+
+Per Kristal & Cohen 2017 - exclude government industries (unlike them, I will be leaving healthcare in), and agriculture
+
+- 000 NIU
+- 010-032 Agriculture etc
+- 842-860 - Schools, Libraries, Educational services
+- 873 - Labor Unions
+
+```{r eval=TRUE}
+
+cpsDATA <- cpsDATA %>% 
+  filter(IND1990 != 873 & IND1990 > 32 & IND1990 < 842 | IND1990 > 860)
+  
+
+```
+
+#### export for stata
+
+```{r eval=FALSE}
+
+write_csv(cpsDATA, "cpsDATA.csv")
+
+```
+
+
+### P_series
+
+Put data in industry-year panel format for plm()
+
+```{r eval=FALSE}
+
+P_series <- pdata.frame(cpsDATA, index = c("IND1990","YEAR"), drop.index=T, row.names = T)
+
+```
+
+# (07-26-2021)
+
+I have moved over the code needed to set up my data from "CPS_QP_clean.Rmd", and am using this document to explore modelling.
+
+I am using my models from the CES project as a guide, but this time I am looking (like Kristal et al.) at *inequality* - specifically, the log of the 90 10 ratio and the variance of log wages (per Kristal 2015 pg 36)
+
+- I also want to do an error correction model (like Kristal), but haven't figured that out yet
+
+Strategy of Analysis:
+
+- fixed effects (plm)
+- Year (pure time trend) *note* I can't figure out how to do this in plm - so maybe I should ask someone later or something
+- Effect of management ratio on inequality
+- Effect of union ratio on inequality
+- Effect of both union and management
+- Effect of union and management interaction
+  - Must do marginal analysis
+
+
+## plm models
+
+### 90_10
+
+- Effect of management ratio on inequality
+- Effect of union ratio on inequality
+- Effect of both union and management
+
+```{r eval=FALSE}
+
+ln9010.mgmt <- plm(log90_10 ~ mgmtRATIO, data = P_series, model = "within")
+
+ln9010.union <- plm(log90_10 ~ pctUNION, data = P_series, model = "within")
+
+ln9010.mgmt_union <- plm(log90_10 ~ mgmtRATIO + pctUNION, data = P_series, model = "within")
+
+```
+
+
+```{r eval=FALSE}
+
+summary(ln9010.mgmt)
+
+```
+
+
+```{r eval=FALSE}
+
+summary(ln9010.union)
+
+```
+
+
+```{r eval=FALSE}
+
+summary(ln9010.mgmt_union)
+
+```
+
+### variance
+
+
+```{r eval=FALSE}
+
+var.mgmt <- plm(var_wages ~ mgmtRATIO, data = P_series, model = "within")
+
+var.union <- plm(var_wages ~ pctUNION, data = P_series, model = "within")
+
+var.mgmt_union <- plm(var_wages ~ mgmtRATIO + pctUNION, data = P_series, model = "within")
+
+```
+
+
+```{r eval=FALSE}
+
+summary(var.mgmt)
+
+```
+
+
+```{r eval=FALSE}
+
+summary(var.union)
+
+```
+
+
+```{r eval=FALSE}
+
+summary(var.mgmt_union)
+
+```
+
+## Marginal Analysis
+
+Run interaction, and then plot margins per the ICPSR lab 5 - "2021.1 Spring/ICPSR MLM Workshop"
+
+```{r eval=FALSE}
+
+ln9010.mgmtXunion <- plm(log90_10 ~ mgmtRATIO * pctUNION, data = P_series, model = "within")
+
+var.mgmtXunion <- plm(var_wages ~ mgmtRATIO * pctUNION, data = P_series, model = "within")
+
+```
+
+### FIX interplot
 
 interplot doesn't play nice with plm, but this dude apparently fixed it: https://github.com/sammo3182/interplot/issues/26#issuecomment-457272328
 
@@ -161,7 +432,7 @@ interplot doesn't play nice with plm, but this dude apparently fixed it: https:/
 
 #rm(list = ls())
 
-
+library(ggeffects)
 library(plm)
 library(interplot)
 
@@ -628,239 +899,6 @@ interplot.plm <- function(m, var1, var2, plot = TRUE, steps = NULL,
 
 ```
 
-# CPS Cleaning
-
-(Taken from "CPS_QP_Clean.Rmd")
-
-## Notes on SQLite
-
-Because the data file is so large, I decided to access it as an SQLite database, instead of loading it into memory.
-
-Information on this is below.
-
-*NOTE: In the future, when I understand SQL, I should rewrite the code, as I could more easily extract just the outgoing groups (which requires loading the database with "integer" columns) in SQL, and leave other stuff to R. For now, I will be doing it in dplyr.
-
-## RSQLite Code
-
-```{r eval=TRUE}
-
-# This code establishes a connection with my database
-# See: https://data.library.virginia.edu/creating-a-sqlite-database-for-use-with-r/
-
-con <- dbConnect(RSQLite::SQLite(), here("data/IPUMS_CPS/cps_master.db"))
-
-# This allows dplyr to use the connection like an object:
-
-cpsALL <- tbl(con, "cpsALL")
-
-```
-
-# Disconnect SQLite
-
-Run this code to disconnect from the database
-
-```{r eval=FALSE}
-
-dbDisconnect(con)
-
-```
-
-
-### Quantiles - 90/10
-
-Seems like Kristal 2017 uses 90/10 ratio as measure of inequality
-
-WARNING: EPI argue that you need to bin before using quantiles, since wages clump at certain values: https://www.epi.org/data/methodology/ (see "Wage Percentiles" section)
-
-```{r eval=FALSE}
-
-# Create ORG Microdata
-
-# list of variables:
-
-cpsORG <- cpsALL %>% 
-  filter(ELIGORG == 1 & YEAR >= 2003) %>% 
-  mutate(unionMEM = if_else(UNION == 2, 1, 0),
-         manager = if_else(OCC2010 >= 10 & OCC2010 <= 430, 1, 0),
-         HOURWAGE2 = if_else(HOURWAGE != 999.99, HOURWAGE, NA_integer_),
-         UHRSWORK1_2 = if_else(UHRSWORK1 == 999 | UHRSWORK1 == 997 | UHRSWORK1 == 0, NA_integer_, UHRSWORK1),
-         hrWAGE2 = if_else(PAIDHOUR == 2, HOURWAGE2,
-                           if_else(PAIDHOUR == 1, (EARNWEEK / UHRSWORK1_2), NA_integer_)),
-         mgmtWAGE = if_else(manager == 1, hrWAGE2, NA_integer_),
-         NONmgmtWAGE = if_else(manager == 0, hrWAGE2, NA_integer_),
-         ln_hrWAGE2 = log(hrWAGE2),
-         ln_mgmtWAGE = log(mgmtWAGE),
-         ln_NONmgmtWAGE = log(NONmgmtWAGE)
-         ) %>% 
-  select(ELIGORG, YEAR, unionMEM, manager, HOURWAGE2, UHRSWORK1_2, hrWAGE2, PAIDHOUR, IND1990, OCC2010, EARNWT, mgmtWAGE, NONmgmtWAGE, ln_hrWAGE2, ln_mgmtWAGE, ln_NONmgmtWAGE) %>% 
-  collect()
-
-## view(head(cpsORG, 300))
-
-
-# Another way to check:
-
-## cpsCHECK <- slice_sample(cpsORG, n = 100) %>% collect()
-
-# Checking on the WKSWORKORG variable - since my "head" has a lot of "1" weeks worked...
-
-## wksCOUNT <- cpsORG %>% count(WKSWORKORG) %>% collect()
-
-# NOTE: Looks like it's all good - most people either work 52 weeks a year, or are 0 (not in universe)
-  
-
-# Create Industry Panel
-
-cpsDATA <- group_by(cpsORG, IND1990, YEAR)
-
-cpsDATA <- summarise(cpsDATA, 
-                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
-                     unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12),
-                     mgmtEMP = (sum(EARNWT * manager, na.rm = TRUE)/12), 
-                     avgWAGE = weighted.mean(hrWAGE2, EARNWT, na.rm = TRUE),
-                     NONmgmtAVG = weighted.mean(NONmgmtWAGE, EARNWT, na.rm = TRUE),
-                     mgmtAVG = weighted.mean(mgmtWAGE, EARNWT, na.rm = TRUE),
-                     ln_avgWAGE = weighted.mean(ln_hrWAGE2, EARNWT, na.rm = TRUE),
-                     ln_NONmgmtAVG = weighted.mean(ln_NONmgmtWAGE, EARNWT, na.rm = TRUE),
-                     ln_mgmtAVG = weighted.mean(ln_mgmtWAGE, EARNWT, na.rm = TRUE),
-                     var_wages = wtd.var(ln_hrWAGE2, EARNWT, na.rm = TRUE),
-                     Wage90 = wtd.quantile(hrWAGE2, EARNWT, probs = .9, na.rm = TRUE),
-                     Wage10 = wtd.quantile(hrWAGE2, EARNWT, probs = .1, na.rm = TRUE))
-
-# Drop big ole data set
-
-rm(cpsORG)
-
-# Create New Variables
-
-cpsDATA <- ungroup(cpsDATA)
-
-cpsDATA <- cpsDATA %>% 
-  mutate(pctUNION = (unionEMP / TotEMP)*100,
-         mgmtRATIO = (mgmtEMP / TotEMP)*100,
-         ratio90_10 = (Wage90 / Wage10),
-         log90_10 = log(Wage90 / Wage10))
-
-```
-
-## Notes
-
-Things seem to be working okay? Go back over everything.
-
-Next, I think you can start running models?
-
-# (07-26-2021)
-
-I have moved over the code needed to set up my data from "CPS_QP_clean.Rmd", and am using this document to explore modelling.
-
-I am using my models from the CES project as a guide, but this time I am looking (like Kristal et al.) at *inequality* - specifically, the log of the 90 10 ratio and the variance of log wages (per Kristal 2015 pg 36)
-
-- I also want to do an error correction model (like Kristal), but haven't figured that out yet
-
-Strategy of Analysis:
-
-- fixed effects (plm)
-- Year (pure time trend) *note* I can't figure out how to do this in plm - so maybe I should ask someone later or something
-- Effect of management ratio on inequality
-- Effect of union ratio on inequality
-- Effect of both union and management
-- Effect of union and management interaction
-  - Must do marginal analysis
-  
-## P_series
-
-Put data in industry-year panel format for plm()
-
-```{r eval=FALSE}
-
-P_series <- pdata.frame(cpsDATA, index = c("IND1990","YEAR"), drop.index=T, row.names = T)
-
-```
-
-## plm models
-
-### 90_10
-
-- Effect of management ratio on inequality
-- Effect of union ratio on inequality
-- Effect of both union and management
-
-```{r eval=FALSE}
-
-ln9010.mgmt <- plm(log90_10 ~ mgmtRATIO, data = P_series, model = "within")
-
-ln9010.union <- plm(log90_10 ~ pctUNION, data = P_series, model = "within")
-
-ln9010.mgmt_union <- plm(log90_10 ~ mgmtRATIO + pctUNION, data = P_series, model = "within")
-
-```
-
-
-```{r eval=FALSE}
-
-summary(ln9010.mgmt)
-
-```
-
-
-```{r eval=FALSE}
-
-summary(ln9010.union)
-
-```
-
-
-```{r eval=FALSE}
-
-summary(ln9010.mgmt_union)
-
-```
-
-### variance
-
-
-```{r eval=FALSE}
-
-var.mgmt <- plm(var_wages ~ mgmtRATIO, data = P_series, model = "within")
-
-var.union <- plm(var_wages ~ pctUNION, data = P_series, model = "within")
-
-var.mgmt_union <- plm(var_wages ~ mgmtRATIO + pctUNION, data = P_series, model = "within")
-
-```
-
-
-```{r eval=FALSE}
-
-summary(var.mgmt)
-
-```
-
-
-```{r eval=FALSE}
-
-summary(var.union)
-
-```
-
-
-```{r eval=FALSE}
-
-summary(var.mgmt_union)
-
-```
-
-## Marginal Analysis
-
-Run interaction, and then plot margins per the ICPSR lab 5 - "2021.1 Spring/ICPSR MLM Workshop"
-
-```{r eval=FALSE}
-
-ln9010.mgmtXunion <- plm(log90_10 ~ mgmtRATIO * pctUNION, data = P_series, model = "within")
-
-var.mgmtXunion <- plm(var_wages ~ mgmtRATIO * pctUNION, data = P_series, model = "within")
-
-```
 
 ### log 90-10
 
@@ -964,4 +1002,150 @@ List of variables needed:
 NOTE!! - looking at lab 5 notes, this is a bit confusing, as "eligibility" doesn't have lags or anything - I need to look at her actual paper, but I am getting tired
   - I took a look, and this is because they believe that immigrant population and medicaid inequality are related (people move to states with better conditions for immigrants), so that is why they add lags etc. to just those
   - Since I believe that it is union and mgmt that are related (not necessarily wage inequality) I need to figure out how to Error Correct or whatever those
+  
+
+## Weighted plm models
+
+### 90_10
+
+- Effect of management ratio on inequality
+- Effect of union ratio on inequality
+- Effect of both union and management
+
+```{r eval=FALSE}
+
+wln9010.mgmt <- plm(log90_10 ~ mgmtRATIO, data = P_series, model = "within", weights = "empWEIGHT")
+
+wln9010.union <- plm(log90_10 ~ pctUNION, data = P_series, model = "within", weights = "empWEIGHT")
+
+wln9010.mgmt_union <- plm(log90_10 ~ mgmtRATIO + pctUNION, data = P_series, model = "within", weights = "empWEIGHT")
+
+```
+
+
+```{r eval=FALSE}
+
+summary(wln9010.mgmt)
+
+```
+
+
+```{r eval=FALSE}
+
+summary(wln9010.union)
+
+```
+
+
+```{r eval=FALSE}
+
+summary(wln9010.mgmt_union)
+
+```
+
+### variance
+
+
+```{r eval=FALSE}
+
+wvar.mgmt <- plm(var_wages ~ mgmtRATIO, data = P_series, model = "within")
+
+wvar.union <- plm(var_wages ~ pctUNION, data = P_series, model = "within")
+
+wvar.mgmt_union <- plm(var_wages ~ mgmtRATIO + pctUNION, data = P_series, model = "within")
+
+```
+
+
+```{r eval=FALSE}
+
+summary(wvar.mgmt)
+
+```
+
+
+```{r eval=FALSE}
+
+summary(wvar.union)
+
+```
+
+
+```{r eval=FALSE}
+
+summary(wvar.mgmt_union)
+
+```
+
+## Weighted Marginal Analysis
+
+Run interaction, and then plot margins per the ICPSR lab 5 - "2021.1 Spring/ICPSR MLM Workshop"
+
+```{r eval=FALSE}
+
+wln9010.mgmtXunion <- plm(log90_10 ~ mgmtRATIO * pctUNION, data = P_series, model = "within", weights = "empWEIGHT")
+
+wvar.mgmtXunion <- plm(var_wages ~ mgmtRATIO * pctUNION, data = P_series, model = "within", weights = "empWEIGHT")
+
+```
+
+### log 90-10
+
+From Lab 5: "2021.1 Spring/ICPSR MLM Workshop"
+
+```{r eval=FALSE}
+
+ln9010.margins <- interplot(m = wln9010.mgmtXunion, var1 = "mgmtRATIO", var2 = "pctUNION", ercolor= "gray")+
+geom_line()+
+theme_minimal()+
+theme(axis.text=element_text(size=16), 
+      axis.title.x = element_text(size=16),
+      axis.title.y = element_text(size=16, color="red",face="bold.italic"))+
+ylab("Marginal Effects of Mgmt Ratio")+
+xlab("Pct Union")+
+geom_hline(yintercept=0, linetype="dotted", lwd=0.5)+
+ggtitle("DV=log 90-10 Wage Inequality")+
+labs(caption="")
+ln9010.margins
+```
+
+### wage variance (variance of log wages)
+
+From Lab 5: "2021.1 Spring/ICPSR MLM Workshop"
+
+```{r eval=FALSE}
+
+var.margins <- interplot(m = wvar.mgmtXunion, var1 = "mgmtRATIO", var2 = "pctUNION", ercolor= "gray")+
+geom_line()+
+theme_minimal()+
+theme(axis.text=element_text(size=16), 
+      axis.title.x = element_text(size=16),
+      axis.title.y = element_text(size=16, color="red",face="bold.italic"))+
+ylab("Marginal Effects of Mgmt Ratio")+
+xlab("Pct Union")+
+geom_hline(yintercept=0, linetype="dotted", lwd=0.5)+
+ggtitle("DV=Variance of Log Wages")+
+labs(caption="")
+var.margins
+```
+
+## Debugging
+
+Looking for NA's
+
+```{r eval=FALSE}
+
+NAcheck <- cpsDATA %>% 
+  mutate(unionNA = is.na(pctUNION),
+         mgmtNA = is.na(mgmtRATIO),
+         weightNA = is.na(sqEMP),
+         unionL = length(pctUNION),
+         mgmtL = length(mgmtRATIO),
+         weightL = length(sqEMP),
+         unionN = nrow(pctUNION),
+         mgmtN = nrow(mgmtRATIO),
+         weightN = nrow(sqEMP),
+         logL = length(log90_10))
+
+```
 
