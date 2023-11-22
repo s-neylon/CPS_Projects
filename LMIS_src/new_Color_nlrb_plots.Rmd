@@ -1,0 +1,440 @@
+---
+title: "NLRB Election Data"
+author: "Sam Neylon"
+date: '2023-01-17'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(tidyverse)
+library(lubridate)
+
+```
+
+# NOTES
+
+##(01-17-23)
+
+Import the unionwebsite cleaned data, put into ggplots.
+
+Data: 
+  * https://github.com/reuning/unionwebsite/tree/main/gen/data
+  * "cleaned_data.csv"
+  
+##(1-18-23)
+
+Figuring out which cities are in NYC:
+  * https://www.mapcustomizer.com/map/NLRB_2019-22_NY
+  * I am going to try using some of the geocode tools used by unionwebsite guy, but FOR NOW, I am sticking with NY state, just to get the charts right.
+
+# Import
+
+```{r}
+
+# raw_data <- read_csv(here("data/NLRB/unionwebsite_1-17_cleaned_data.csv"),
+#                     col_types = cols(.default = col_character()))
+
+raw_data <- read_csv(here("data/NLRB/unionwebsite_1-17_cleaned_data.csv"),
+                     col_types = cols(
+  Case = col_character(),
+  Region = col_character(),
+  Case_Name = col_character(),
+  Date_Filed = col_date(format = ""),
+  Date_Closed = col_date(format = ""),
+  City = col_character(),
+  State = col_character(),
+  `Unit ID` = col_character(),
+  Tally_Date = col_date(format = ""),
+  Num_Eligible_Voters = col_double(),
+  `Void Ballots` = col_double(),
+  Labor_Union = col_character(),
+  Votes_For_Union = col_double(),
+  `Labor Union2` = col_character(),
+  `Votes for Labor Union2` = col_double(),
+  `Labor Union3` = col_character(),
+  `Votes for Labor Union3` = col_double(),
+  Votes_Against = col_double(),
+  Total_Ballots_Counted = col_double(),
+  `Runoff Required` = col_character(),
+  `Challenged Ballots` = col_double(),
+  `Challenges are Determinative` = col_character(),
+  `Union to Certify` = col_character(),
+  Tally_Type = col_character(),
+  Ballot_Type = col_character(),
+  Reason_Closed = col_character(),
+  Status = col_character(),
+  `Voting Unit (Unit A)` = col_character(),
+  `Voting Unit (Unit B)` = col_character(),
+  `Voting Unit (Unit C)` = col_character(),
+  `Voting Unit (Unit D)` = col_character(),
+  Length = col_double(),
+  Tally_Quarter = col_date(format = ""),
+  Filed_Quarter = col_date(format = ""),
+  size = col_character(),
+  Unique = col_logical(),
+  Case_Type = col_character(),
+  Election_Data = col_character(),
+  Plot_Labor_Union = col_character(),
+  National = col_character(),
+  National_Count = col_double(),
+  Margin = col_double(),
+  Union_Cer = col_character(),
+  Didnt_Vote = col_double()
+))
+
+```
+
+# Cleaning
+
+## Select
+
+```{r eval=TRUE}
+
+clean_df <- raw_data %>% 
+  filter(Case_Type == "RC")
+
+# rm(raw_data)
+
+```
+
+## Data Fixes
+
+FIX MONTEFIORE!
+Case: 02-RC-308481
+I changed this by hand based on: https://www.bxtimes.com/montefiore-physician-residents-union-cir/
+To: 1200 Num_Eligible_Voters
+
+```{r eval=TRUE}
+
+clean_df <- clean_df %>% 
+  # Clean Montefiore Number
+  mutate(
+    Num_Eligible_Voters = ifelse(Case %in% "02-RC-308481", 1200, Num_Eligible_Voters)
+  )
+
+```
+
+## New Columns
+
+```{r eval=TRUE}
+
+clean_df <- clean_df %>% 
+  mutate(
+    New_Mem = case_when(
+      is.na(Margin) ~ 0,
+      Margin > 0.5 ~ Num_Eligible_Voters,
+      Margin <= 0.5 ~ 0),
+    Won = case_when(
+      is.na(Margin) ~ 0,
+      Margin > 0.5 ~ 1,
+      Margin <= 0.5 ~ 0),
+    NY = ifelse(State == "NY", 1, 0),
+    #NYC = case_when(
+      #City %in% c("Astoria", "Bronx", )
+    )
+
+```
+
+# Tables
+
+## Num Workers
+
+```{r eval=TRUE}
+
+graph_table <- clean_df %>% 
+  filter(between(Date_Filed, as.Date('2019-01-01'),as.Date('2022-12-31'))) %>% 
+  group_by(year = floor_date(Date_Filed, 'year')) %>% 
+  summarise(
+    USA_work = sum(Num_Eligible_Voters),
+    USA_work_win = sum(New_Mem),
+    NY_work = sum(Num_Eligible_Voters*NY),
+    NY_work_win = sum(New_Mem*NY)
+  ) %>% 
+  mutate(USA_work_NOwin = USA_work - USA_work_win,
+         NY_work_NOwin = NY_work - NY_work_win,
+         YEAR = year(year))
+
+longer_table <- graph_table %>% 
+  select(year, USA_work_win, NY_work_win, USA_work_NOwin, NY_work_NOwin) %>% 
+  pivot_longer(c(USA_work_win, NY_work_win, USA_work_NOwin, NY_work_NOwin), names_to = "cat", values_to = "Workers") %>% 
+  mutate(YEAR = year(year),
+         geo = case_when(
+           str_detect(cat, "USA") ~ "USA",
+           str_detect(cat, "NY") ~ "NY"
+         ),
+         Win = case_when(
+           str_detect(cat, "_win") ~ "Win",
+           str_detect(cat, "_NOwin") ~ "No Win"
+         ),
+         geo = factor(geo, levels = c("USA", "NY")),
+         Win = factor(Win)
+         )
+
+
+all_long_table <- graph_table %>% 
+  select(year, USA_work_win, NY_work_win, USA_work, NY_work) %>% 
+  pivot_longer(c(USA_work_win, NY_work_win, USA_work, NY_work), names_to = "cat", values_to = "Workers") %>% 
+  mutate(YEAR = year(year),
+         geo = case_when(
+           str_detect(cat, "USA") ~ "USA",
+           str_detect(cat, "NY") ~ "NY State"
+         ),
+         Win = ifelse(str_detect(cat, "_win"), "Win", "All"),
+         geo = factor(geo, levels = c("USA", "NY State")),
+         Win = factor(Win))
+
+
+```
+
+## Election Count
+
+```{r eval=FALSE}
+
+graph_table_count <- clean_df %>% 
+  filter(between(Date_Filed, as.Date('2019-01-01'),as.Date('2022-12-31'))) %>% 
+  group_by(year = floor_date(Date_Filed, 'year')) %>% 
+  summarise(
+    USA_count = count(Num_Eligible_Voters),
+    USA_count_win = count(New_Mem),
+    NY_count = count(Num_Eligible_Voters*NY),
+    NY_count_win = count(New_Mem*NY)
+  ) %>% 
+  mutate(USA_count_NOwin = USA_count - USA_count_win,
+         NY_count_NOwin = NY_count - NY_count_win,
+         YEAR = year(year))
+
+longer_table_count <- graph_table_count %>% 
+  select(year, USA_work_win, NY_work_win, USA_work_NOwin, NY_work_NOwin) %>% 
+  pivot_longer(c(USA_work_win, NY_work_win, USA_work_NOwin, NY_work_NOwin), names_to = "cat", values_to = "Workers") %>% 
+  mutate(YEAR = year(year),
+         geo = case_when(
+           str_detect(cat, "USA") ~ "USA",
+           str_detect(cat, "NY") ~ "NY"
+         ),
+         Win = case_when(
+           str_detect(cat, "_win") ~ "Win",
+           str_detect(cat, "_NOwin") ~ "No Win"
+         ),
+         geo = factor(geo, levels = c("USA", "NY")),
+         Win = factor(Win)
+         )
+
+
+all_long_table_count <- graph_table_count %>% 
+  select(year, USA_work_win, NY_work_win, USA_work, NY_work) %>% 
+  pivot_longer(c(USA_work_win, NY_work_win, USA_work, NY_work), names_to = "cat", values_to = "Workers") %>% 
+  mutate(YEAR = year(year),
+         geo = case_when(
+           str_detect(cat, "USA") ~ "USA",
+           str_detect(cat, "NY") ~ "NY"
+         ),
+         Win = ifelse(str_detect(cat, "_win"), "Win", "All"),
+         geo = factor(geo, levels = c("USA", "NY")),
+         Win = factor(Win))
+
+
+```
+
+# Plots
+
+## Setup
+
+```{r eval=TRUE}
+
+#remove.packages("Rttf2pt1")
+#remotes::install_version("Rttf2pt1", version = "1.3.8")
+#extrafont::font_import()
+
+library(hrbrthemes)
+library(scales)
+
+library("ggthemes")
+library(extrafont)
+
+```
+
+## Bars
+
+```{r eval = FALSE}
+
+worker_plot <- ggplot(data = longer_table, aes(x = YEAR, y = Workers, group = factor(geo), fill = factor(Win))) +
+  geom_col(position = "dodge")
+
+plot(worker_plot)
+
+```
+
+### One that Works
+
+```{r eval = TRUE}
+
+worker_plot2 <- ggplot() +
+  geom_col(data = subset(all_long_table, Win == "All"), mapping = aes(x = YEAR, y = Workers, group = geo), position = "dodge", fill = "#4477AA", colour = "#fbf7ea") +
+  geom_text(data = subset(all_long_table, Win == "All" & YEAR == 2019), mapping = aes(x = YEAR, y = Workers, group = geo, label = geo), position = position_dodge(width = 0.9), vjust = -1) +
+  geom_col(data = subset(all_long_table, Win == "Win"), mapping = aes(x = YEAR, y = Workers, group = geo, fill = Win), position = "dodge", colour = "#fbf7ea") +
+  scale_fill_manual(values = c("#CC6677")) +
+#  geom_text(data = subset(all_long_table, Win == "Win" & YEAR == 2019), mapping = aes(x = YEAR, y = Workers, group = geo, label = Win), position = position_dodge(width = 1), vjust = -1) + 
+  labs(x= element_blank(), 
+       y= element_blank(),
+       fill = element_blank(),
+       title="NLRB Elections",
+       subtitle="Number of Workers in NLRB Elections, by Year of Filing") + 
+  #coord_cartesian(ylim = c(0,140000)) +
+  scale_y_comma(limits = c(0,139000)) +
+  theme_ipsum(grid = "Y",
+              plot_margin = margin(10, 10, 10, 10),
+              plot_title_margin = 5,
+              subtitle_margin = 5) + 
+  update_geom_font_defaults()
+
+plot(worker_plot2)
+
+```
+
+```{r eval = FALSE}
+
+worker_bars <- ggplot() +
+  geom_col(data = graph_table, mapping = aes(x = YEAR, y = ))
+
+```
+
+### Save
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/nlrb_graph.png"), plot = worker_plot2, width = 7, height = 5, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```
+
+## Doesn't work, with Loss/Pending
+
+```{r eval = FALSE}
+
+worker_plot3 <- ggplot() +
+  geom_col(data = subset(all_long_table, Win == "All"), mapping = aes(x = YEAR, y = Workers, group = geo), position = "dodge", fill = "#4477AA", colour = "#fbf7ea") +
+  geom_text(data = subset(all_long_table, Win == "All" & YEAR == 2019), mapping = aes(x = YEAR, y = Workers, group = geo, label = geo), position = position_dodge(width = 0.9), vjust = -1) +
+  geom_col(data = subset(all_long_table, Win == "Win"), mapping = aes(x = YEAR, y = Workers, group = geo, fill = Win), position = "dodge", colour = "#fbf7ea") +
+  scale_fill_manual(values = c("#CC6677")) +
+#  geom_text(data = subset(all_long_table, Win == "Win" & YEAR == 2019), mapping = aes(x = YEAR, y = Workers, group = geo, label = Win), position = position_dodge(width = 1), vjust = -1) + 
+  labs(x= element_blank(), 
+       y= element_blank(),
+       fill = element_blank(),
+       title="NLRB Elections",
+       subtitle="Number of Workers in NLRB Elections, by Year of Filing") + 
+  #coord_cartesian(ylim = c(0,140000)) +
+  scale_y_comma(limits = c(0,139000)) +
+  theme_ipsum(grid = "Y",
+              plot_margin = margin(10, 10, 10, 10),
+              plot_title_margin = 5,
+              subtitle_margin = 5) + 
+  update_geom_font_defaults()
+
+plot(worker_plot3)
+
+```
+
+### Save
+
+```{r eval=FALSE}
+
+ggsave(here("LMIS_src/graphs/nlrb_graph2.png"), plot = worker_plot3, width = 7, height = 5, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```
+
+# Line
+
+```{r eval=FALSE}
+
+worker_line <- ggplot() +
+  geom_line(data = graph_table, mapping = aes(x = YEAR, y = US_work), colour = "#4477AA", size = 2, linetype = 1) +
+  geom_line(data = graph_table, mapping = aes(x = YEAR, y = US_work_win), colour = "#4477AA", size = 2, linetype = 2) +
+  geom_line(data = graph_table, mapping = aes(x = YEAR, y = NY_work), colour = "#CC6677", size = 2, linetype = 1) +
+  geom_line(data = graph_table, mapping = aes(x = YEAR, y = NY_work_win), colour = "#CC6677", size = 2, linetype = 2) +
+  labs(x= element_blank(), y="% Unionization",
+       title="Unionization by Occupation",
+       subtitle="Comparing Unionization by Occupational Groups, 2019-2022") + 
+  coord_cartesian(ylim = c(0,150000)) +
+  theme_ipsum(grid = "Y")
+  
+  
+plot(worker_line)
+
+```
+
+# Export Tables
+
+```{r eval=FALSE}
+
+write_csv(graph_table, "NLRB_table.csv")
+
+```
+
+# New Bar
+
+## Loss/Pending
+
+```{r eval = TRUE}
+
+all_long_table2 <- graph_table %>% 
+  select(year, USA_work_win, NY_work_win, USA_work, NY_work) %>% 
+  pivot_longer(c(USA_work_win, NY_work_win, USA_work, NY_work), names_to = "cat", values_to = "Workers") %>% 
+  mutate(YEAR = year(year),
+         geo = case_when(
+           str_detect(cat, "USA") ~ "USA",
+           str_detect(cat, "NY") ~ "NY State"
+         ),
+         Win = ifelse(str_detect(cat, "_win"), "Win", "Loss/Pending"),
+         geo = factor(geo, levels = c("USA", "NY State")),
+         Win = factor(Win))
+
+worker_plot_loss <- ggplot() +
+  geom_col(data = subset(all_long_table2, Win == "Loss/Pending"), mapping = aes(x = YEAR, y = Workers, group = geo, fill = Win), position = "dodge", colour = "#fbf7ea") +
+  geom_text(data = subset(all_long_table, Win == "All" & YEAR == 2019), mapping = aes(x = YEAR, y = Workers, group = geo, label = geo), position = position_dodge(width = 0.9), vjust = -1) +
+  geom_col(data = subset(all_long_table2, Win == "Win"), mapping = aes(x = YEAR, y = Workers, group = geo, fill = Win), position = "dodge", colour = "#fbf7ea") +
+  scale_fill_manual(values = c("#4477AA", "#CC6677")) +
+#  geom_text(data = subset(all_long_table2, Win == "Win" & YEAR == 2019), mapping = aes(x = YEAR, y = Workers, group = geo, label = Win), position = position_dodge(width = 1), vjust = -1) + 
+  labs(x= element_blank(), 
+       y= element_blank(),
+       fill = element_blank(),
+       title="NLRB Elections",
+       subtitle="Number of Workers in NLRB Elections, by Year of Filing") + 
+  #coord_cartesian(ylim = c(0,140000)) +
+  scale_y_comma(limits = c(0,139000)) +
+  theme_ipsum(grid = "Y",
+              plot_margin = margin(10, 10, 10, 10),
+              plot_title_margin = 5,
+              subtitle_margin = 5) + 
+  update_geom_font_defaults()
+
+plot(worker_plot_loss)
+
+```
+
+### Save
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/nlrb_graph_loss.png"), plot = worker_plot_loss, width = 7, height = 5, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```

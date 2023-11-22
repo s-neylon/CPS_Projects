@@ -1,0 +1,45 @@
+---
+title: "Milkman JOLTS"
+author: "Sam Neylon"
+date: "10/24/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(tidyverse)
+library(lubridate)
+
+```
+
+
+```{r eval=TRUE}
+
+JOLTS_df <- read_csv(here("data/JOLTS_2020-2021_edit.csv"))
+
+```
+
+```{r eval=TRUE}
+
+JOLTS_pivot <- JOLTS_df %>% pivot_longer(5:24, names_to = "RAWdate", values_to = "value")
+
+```
+
+```{r eval = TRUE}
+
+JOLTS_final <- JOLTS_pivot %>% mutate(date = ym(RAWdate)) %>% select(-(RAWdate))
+
+```
+
+
+
+```{r eval=TRUE}
+
+write_csv(JOLTS_final, "JOLTS_2020-2021_pivot.csv")
+
+```
+
+
+

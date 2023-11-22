@@ -1,0 +1,1597 @@
+---
+title: "LMIS CPS Union Estimates"
+author: "Sam Neylon"
+date: "1/5/2023"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#### Using "here" to keep project directory as working directory
+#### NOTE: Rmarkdown will try to make the file it is inside the working directory, but "here" should fix it.
+
+library(here)
+library(tidyverse)
+library(data.table)
+library(DBI)
+library(Hmisc)
+library(pacman)
+library(ggplot2)
+library(openxlsx)
+# library(srvyr)
+
+```
+
+# NOTES
+
+## (01-05-2023)
+
+I am taking code from earlier CPS projects (using the SEM class code because it is most recent). I am going to leave in the wage stuff for now, just to not mess with the code too much.
+
+Things to think about:
+
+  1. Previous Cleaning
+I cleaned the previous data to make the wage info better, but if I'm not using wage info here, I need to make sure I included everyone who should be included.
+  2. Comparability with BLS, unionstats, and State of the Unions
+I need to make sure I am counting employees the same way, etc.
+  3. IPUMS API
+Would be nice to have a programmatic way to make sure I am pulling the same data every time.
+
+To Do:
+
+  1. Demographics
+My previous research didn't use demographic data, so I need to do the standard recodes for race/ethnicity, education, etc.
+  2. Occupation and Industry codes
+I want to use the Census versions, since all the years should be the same.
+  3. Geography
+Best way to capture this? Sometimes IPUMS counties aren't great.
+  4. Panels!
+The way I calculated union density by industry was to make up an industry panel. I could do this with each demographic group, or I could use 'survey' package?
+
+IPUMS:
+
+  * Get Geography!
+  * County vs. MSA: https://forum.ipums.org/t/will-there-be-some-people-in-one-county-be-identified-at-county-level-while-others-not/2386
+
+##(01-10-2023)
+
+* I have downloaded 2019-2022 data, but it is still missing Dec 2022, so I will need to add that later.
+* Data includes different geographic variables, including County, MSA, and Principal City (within MSA).
+  * I will figure out the best to use through testing later.
+  
+*NOTE* Okay, I think it will be better to use You's code! I am using code from her ACS coding.
+
+##(01-12-23)
+
+Working on Occupation and Industry analyses.
+
+##(01-16-2023)
+
+1. I checked the OCC2010 codes, specifically the Stocker ones (which were moved from SOC 43 to 53 in the 2010-2018 transition). The OCC2010 does a good job managing this transition (see OneNote notes for more info).
+
+2. I am going to code the larger OCC categories, instead of doing a join. This is because these are often consistent, and I keep using them, so if I just write the code once, I can use it again!
+
+### POOLING!
+
+*NOTE!!* I was mistakenly dividing each year by 12, which divided the 2022 numbers (I still don't have December) by too much.
+
+  This wasn't necessarily a mistake, since I was going to add them...
+  
+  BUT, I think it is better to just pool everything!
+  
+  I have written code for doing this down in the "Monthly Approach" section.
+  
+  From now on, I will be using this, so I will set all the functions which divide by 12 to FALSE, and re-write the code as necessary!
+  
+  I WILL BE CHANGING THE MAIN FUNCTIONS TO THE _pool FUNCTIONS, SO I DON'T NEED TO RE-WRITE EVERYTHING.
+  
+  Now that I am pooling, I can just include the n's, so I am replacing union_function with union_check_pool!
+  
+##(01-17-23)
+
+Doing plots today!
+  
+##(01-23-2023)
+
+Saved this as new file, old file is called "CPS_union_estimates.Rmd"
+
+I now have Dec 2022 data, so I am changing the .csv input.
+
+##(02-06-2023)
+
+New version of file created, to have all colors be the same.
+  
+
+# Import
+
+## CPI99
+
+The CPI-U inflation adjustment variable 'CPI99' seems to only be available for the ASEC, so I will import a version downloaded from IPUMS below.
+
+CPI99 values: https://cps.ipums.org/cps/cpi99.shtml
+
+I will create inflation adjusted variables in sections below.
+
+```{r eval=FALSE, evalSetup}
+
+CPIdata <- read_csv(here("data/UPDATE THIS CSV"))
+
+```
+
+## CPS Data
+
+### Data Notes
+
+  1. Union Members
+Currently I take UNION==2 to be a union member - check this with other sources.
+  2. CLASSWKR
+I am taking groups 20-28: https://cps.ipums.org/cps-action/variables/CLASSWKR#codes_section
+
+### Import
+
+NOTE: In previous iterations, I used the RSQLite package to use a SQL version of the data, because I was using many years. Because I am only using a few years, hopefully I won't need to do that this time.
+
+I have re-written the code to use data.table for import.
+
+```{r}
+
+# Import
+
+cpsALL <- fread(here("data/LMIS_cps_2019-2022.csv"))
+
+# Filter ORG
+
+cpsORG <- cpsALL %>% 
+  filter(ELIGORG == 1, between(CLASSWKR, 20, 28)) %>% 
+  mutate(unionMEM = if_else(UNION == 2, 1, 0),
+         y_m = str_c(YEAR, MONTH, sep = "_"))
+
+rm(cpsALL)
+
+```
+
+## Import Titles
+
+```{r eval=TRUE}
+
+# OCC2010 Titles
+
+OCC2010_titles <- read_csv(here("data/OCC2010_codes.csv"))
+
+```
+
+
+### Old Code
+
+I don't think I will include this wage info, so only simplified code is moved to the import box above.
+
+*NOTE* Delete this old code if you don't end up using it!
+
+```{r eval=FALSE, evalSetup}
+
+# Create ORG Microdata
+
+# list of variables:
+
+cpsORG <- cpsALL %>% 
+  filter(ELIGORG == 1, between(CLASSWKR, 20, 28)) %>% 
+  mutate(unionMEM = if_else(UNION == 2, 1, 0),
+         manager = if_else(OCC2010 >= 10 & OCC2010 <= 430, 1, 0),
+         EARNWEEK2 = ifelse(EARNWEEK >= 9999, NA_integer_,
+                             if_else(EARNWEEK > 1923, 1923, EARNWEEK)),
+         HOURWAGE2 = if_else(HOURWAGE != 999.99, HOURWAGE, NA_integer_),
+         UHRSWORK1_2 = if_else(UHRSWORK1 == 999 | UHRSWORK1 == 997 | UHRSWORK1 == 0, NA_integer_, UHRSWORK1),
+         hrWAGE2 = if_else(PAIDHOUR == 2, HOURWAGE2,
+                           if_else(PAIDHOUR == 1, (EARNWEEK2 / UHRSWORK1_2), NA_integer_))) %>% 
+  filter(hrWAGE2 > 1, UHRSWORK1_2 > 16) %>% 
+  mutate(mgmtWAGE = if_else(manager == 1, hrWAGE2, NA_integer_),
+         NONmgmtWAGE = if_else(manager == 0, hrWAGE2, NA_integer_),
+         ln_hrWAGE2 = log(hrWAGE2),
+         ln_mgmtWAGE = log(mgmtWAGE),
+         ln_NONmgmtWAGE = log(NONmgmtWAGE)
+         ) %>% 
+  select(ELIGORG, YEAR, unionMEM, manager, HOURWAGE2, UHRSWORK1_2, hrWAGE2, PAIDHOUR, IND1990, OCC2010, EARNWT, mgmtWAGE, NONmgmtWAGE, ln_hrWAGE2, ln_mgmtWAGE, ln_NONmgmtWAGE)
+
+## view(head(cpsORG, 300))
+
+
+# Another way to check:
+
+## cpsCHECK <- slice_sample(cpsORG, n = 100) %>% collect()
+
+# Checking on the WKSWORKORG variable - since my "head" has a lot of "1" weeks worked...
+
+## wksCOUNT <- cpsORG %>% count(WKSWORKORG) %>% collect()
+
+# NOTE: Looks like it's all good - most people either work 52 weeks a year, or are 0 (not in universe)
+  
+# Add CPI99 inflation information
+
+cpsORG <- cpsORG %>% inner_join(CPIdata, by = "YEAR") %>% 
+  mutate(INFLhrWAGE2 = hrWAGE2*CPI99,
+         inflNMwage = ifelse(manager == 0, INFLhrWAGE2, NA_integer_))
+
+# Create Industry Panel
+
+cpsDATA <- group_by(cpsORG, IND1990, YEAR)
+
+cpsDATA <- summarise(cpsDATA, 
+                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+                     unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12),
+                     mgmtEMP = (sum(EARNWT * manager, na.rm = TRUE)/12), 
+                     avgWAGE = weighted.mean(hrWAGE2, EARNWT, na.rm = TRUE),
+                     NONmgmtAVG = weighted.mean(NONmgmtWAGE, EARNWT, na.rm = TRUE),
+                     mgmtAVG = weighted.mean(mgmtWAGE, EARNWT, na.rm = TRUE),
+                     ln_avgWAGE = weighted.mean(ln_hrWAGE2, EARNWT, na.rm = TRUE),
+                     ln_NONmgmtAVG = weighted.mean(ln_NONmgmtWAGE, EARNWT, na.rm = TRUE),
+                     ln_mgmtAVG = weighted.mean(ln_mgmtWAGE, EARNWT, na.rm = TRUE),
+                     var_wages = wtd.var(ln_hrWAGE2, EARNWT, na.rm = TRUE),
+                     #Wage90 = wtd.quantile(hrWAGE2, EARNWT, probs = .9, na.rm = TRUE),
+                     #Wage10 = wtd.quantile(hrWAGE2, EARNWT, probs = .1, na.rm = TRUE),
+                     Wage90 = quantile(hrWAGE2, probs = .9, na.rm = TRUE),
+                     Wage10 = quantile(hrWAGE2, probs = .1, na.rm = TRUE),
+                     INFLavgWAGE = weighted.mean(INFLhrWAGE2, EARNWT, na.rm = TRUE),
+                     inflNMavg = weighted.mean(inflNMwage, EARNWT, na.rm = TRUE))
+
+cpsDATA <- ungroup(cpsDATA)
+
+# Drop big ole data set
+
+rm(cpsORG)
+
+
+# Create New Variables
+
+cpsDATA <- cpsDATA %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100,
+         mgmtRATIO = (mgmtEMP / TotEMP)*100,
+         ratio90_10 = (Wage90 / Wage10),
+         log90_10 = log(Wage90 / Wage10),
+         sd_wages = sqrt(var_wages),
+         mgmtWAGEratio = mgmtAVG / NONmgmtAVG,
+         log_mWr = log(mgmtAVG / NONmgmtAVG))
+
+
+
+```
+
+# You ACS Code
+
+```{r eval=TRUE}
+
+cpsORG <- cpsORG %>% mutate(
+  newsex = case_when(SEX == 1  ~ 'male',
+                     SEX == 2  ~ 'female'),
+   ethnicity = case_when(RACE == 100 & HISPAN == 0 ~ 'White, Not Hispanic',
+                       RACE == 200 & HISPAN == 0 ~ 'Black, Not Hispanic',
+                       RACE >= 650 & RACE <= 652 & HISPAN==0 ~ 'Asian, Not Hispanic',
+                       HISPAN==0 & RACE == 300 | (RACE >= 700 & RACE <= 830) ~'Other, Not Hispanic',
+                       HISPAN!=0 ~ 'Hispanic',),
+  newedu = case_when(EDUC<=72 ~ 'Less than HS',
+                     EDUC==73 ~ 'HS Diploma or Equivalent',
+                     EDUC==81 ~ 'Some College',
+                     EDUC %in% c(91,92) ~ 'Associate Degree',
+                     EDUC==111 ~ 'Bachelor Degree',
+                     EDUC==123 ~ 'Master Degree',
+                     EDUC %in% c(124,125) ~ 'Doctoral/Professional Degree'),
+  newsex=factor(newsex,levels=c('male','female')),
+  ethnicity=factor(ethnicity,levels=c('White, Not Hispanic','Black, Not Hispanic', 'Asian, Not Hispanic', 'Other, Not Hispanic', 'Hispanic')),
+  newedu=factor(newedu,levels=c('Less than HS','HS Diploma or Equivalent','Some College','Associate Degree','Bachelor Degree','Master Degree','Doctoral/Professional Degree')),
+  # 5606 = NYC Metro Area
+  NYC = ifelse(METAREA==5606, 1, 0),
+  sector_worker = ifelse(between(CLASSWKR, 24, 28) & CLASSWKR != 26, 'Public Worker',
+                         ifelse(CLASSWKR==99, 'Missing/Unknown', 'Private Worker')),
+  age_cat = case_when(
+    between(AGE, 25,34) ~ "25-34",
+    between(AGE, 35,44) ~ "35-44",
+    between(AGE, 45,54) ~ "45-54",
+    between(AGE, 55,64) ~ "55-64"
+  )
+)
+```
+
+# Census OCC Big Categories code
+
+## Census Crosswalk
+
+Find in doc/2010-occ-codes-with-crosswalk-from-2002-2011.xls
+
+Titles, which go along with both Census and SOC codes (except for Transportation and Material Moving Occupations, which is just 53-0000 in SOC).
+
+SOC 2-digit codes.
+
+```{r eval=TRUE}
+
+cpsORG <- cpsORG %>% mutate(
+  OCC_cat_title = case_when(
+    between(OCC2010, 10, 430) ~ "Management Occupations",
+    between(OCC2010, 500, 950) ~ "Business and Financial Operations Occupations",
+    between(OCC2010, 1000, 1240) ~ "Computer and Mathematical Occupations",
+    between(OCC2010, 1300, 1560) ~ "Architecture and Engineering Occupations",
+    between(OCC2010, 1600, 1965) ~ "Life, Physical, and Social Science Occupations",
+    between(OCC2010, 2000, 2060) ~ "Community and Social Service Occupations",
+    between(OCC2010, 2100, 2160) ~ "Legal Occupations",
+    between(OCC2010, 2200, 2550) ~ "Education, Training, and Library Occupations",
+    between(OCC2010, 2600, 2960) ~ "Arts, Design, Entertainment, Sports, and Media Occupations",
+    #between(OCC2010, 3000, 3540) ~ "Healthcare Practitioners and Technical Occupations",
+    between(OCC2010, 3000, 3540) ~ "Healthcare Practitioners",
+    between(OCC2010, 3600, 3655) ~ "Healthcare Support Occupations",
+    between(OCC2010, 3700, 3955) ~ "Protective Service Occupations",
+    between(OCC2010, 4000, 4160) ~ "Food Preparation and Serving Related Occupations",
+    #between(OCC2010, 4200, 4250) ~ "Building and Grounds Cleaning and Maintenance Occupations",
+    between(OCC2010, 4200, 4250) ~ "Building and Grounds",
+    between(OCC2010, 4300, 4650) ~ "Personal Care and Service Occupations",
+    between(OCC2010, 4700, 4965) ~ "Sales and Related Occupations",
+    between(OCC2010, 5000, 5940) ~ "Office and Administrative Support Occupations",
+    between(OCC2010, 6005, 6130) ~ "Farming, Fishing, and Forestry Occupations",
+    between(OCC2010, 6200, 6940) ~ "Construction and Extraction Occupations",
+    between(OCC2010, 7000, 7630) ~ "Installation, Maintenance, and Repair Occupations",
+    between(OCC2010, 7700, 8965) ~ "Production Occupations",
+    between(OCC2010, 9000, 9420) ~ "Transportation Occupations",
+    between(OCC2010, 9500, 9750) ~ "Material Moving Occupations",
+    between(OCC2010, 9800, 9830) ~ "Military Specific Occupations",
+    OCC2010 == 9920 ~ "Unemployed",
+    OCC2010 == 9999 ~ "NIU"
+    ),
+  OCC_cat_SOC = case_when(
+    between(OCC2010, 10, 430) ~ 11,
+    between(OCC2010, 500, 950) ~ 13,
+    between(OCC2010, 1000, 1240) ~ 15,
+    between(OCC2010, 1300, 1560) ~ 17,
+    between(OCC2010, 1600, 1965) ~ 19,
+    between(OCC2010, 2000, 2060) ~ 21,
+    between(OCC2010, 2100, 2160) ~ 23,
+    between(OCC2010, 2200, 2550) ~ 25,
+    between(OCC2010, 2600, 2960) ~ 27,
+    between(OCC2010, 3000, 3540) ~ 29,
+    between(OCC2010, 3600, 3655) ~ 31,
+    between(OCC2010, 3700, 3955) ~ 33,
+    between(OCC2010, 4000, 4160) ~ 35,
+    between(OCC2010, 4200, 4250) ~ 37,
+    between(OCC2010, 4300, 4650) ~ 39,
+    between(OCC2010, 4700, 4965) ~ 41,
+    between(OCC2010, 5000, 5940) ~ 43,
+    between(OCC2010, 6005, 6130) ~ 45,
+    between(OCC2010, 6200, 6940) ~ 47,
+    between(OCC2010, 7000, 7630) ~ 49,
+    between(OCC2010, 7700, 8965) ~ 51,
+    # NOTE: In SOC, Transportation and Material Moving are all under 53-0000
+    between(OCC2010, 9000, 9420) ~ 53,
+    between(OCC2010, 9500, 9750) ~ 53,
+    between(OCC2010, 9800, 9830) ~ 55,
+    OCC2010 == 9920 ~ 99,
+    OCC2010 == 9999 ~ 99
+  )
+)
+
+```
+
+# Census IND Codes
+
+The nice thing with these big codes is, the industries don't change *that* much between cycles (and if they do, I can change those by hand), so if I'm aggregating to the equivalent of NAICS 2-digit, I can do it without necessarily having to crosswalk the codes.
+
+I am using the 2017 Census/NAICS codes, kept in doc/2017-industry-code-list-with-crosswalk.xlsx
+
+I am looking at the 2012-2017 Changes tab in that folder to make sure the 2012 categorization isn't too different, so I can use it for 2019 CPS data.
+
+## Cleaning
+
+* I used the file doc/IND_cat_worksheet.xlsx to quickly code this section.
+
+* However, two 2019 (2012 NAICS) industries aren't working: 7070, 8560
+  * I am going to change the code below (which is different than the IND_cat_worksheet), so that 7070 is added to Real Estate, and 8560 is added to Arts, Entertainment, and Recreation
+  * I'm guessing that the 2017 code purposely left these out (the codes start at 7071 for example), but in these big groupings, it's all good!
+
+
+```{r eval=TRUE}
+
+cpsORG <- cpsORG %>% 
+  mutate(
+    IND_cat_title = case_when(
+      between(IND, 170, 290) ~ "Agriculture, Forestry, Fishing, and Hunting",
+      between(IND, 370, 490) ~ "Mining, Quarrying, and Oil and Gas Extraction",
+      between(IND, 570, 690) ~ "Utilities",
+      IND == 770 ~ "Construction",
+      between(IND, 1070, 3990) ~ "Manufacturing",
+      between(IND, 4070, 4590) ~ "Wholesale Trade",
+      between(IND, 4670, 5790) ~ "Retail Trade",
+      between(IND, 6070, 6390) ~ "Transportation and Warehousing",
+      between(IND, 6470, 6780) ~ "Information ",
+      between(IND, 6870, 6992) ~ "Finance and Insurance",
+      between(IND, 7070, 7190) ~ "Real Estate and Rental and Leasing",
+      between(IND, 7270, 7490) ~ "Professional, Scientific, and Technical Services",
+      IND == 7570 ~ "Management of companies and enterprises",
+      #between(IND, 7580, 7790) ~ "Administrative and Support and Waste Management Services",
+      between(IND, 7580, 7790) ~ "Admin/Support/Waste Mgmt.",
+      between(IND, 7860, 7890) ~ "Educational Services",
+      between(IND, 7970, 8470) ~ "Health Care and Social Assistance",
+      between(IND, 8560, 8590) ~ "Arts, Entertainment, and Recreation",
+      between(IND, 8660, 8690) ~ "Accommodation and Food Services",
+      between(IND, 8770, 9290) ~ "Other Services, Except Public Administration",
+      between(IND, 9370, 9590) ~ "Public Administration",
+      between(IND, 9670, 9870) ~ "Military",
+      IND == 9920 ~ "Unemployed"
+    ),
+    IND_cat_NAICS = case_when(
+      between(IND, 170, 290) ~ "11",
+      between(IND, 370, 490) ~ "21",
+      between(IND, 570, 690) ~ "22",
+      IND == 770 ~ "23",
+      between(IND, 1070, 3990) ~ "31-33",
+      between(IND, 4070, 4590) ~ "42",
+      between(IND, 4670, 5790) ~ "44-45",
+      between(IND, 6070, 6390) ~ "48-49",
+      between(IND, 6470, 6780) ~ "51",
+      between(IND, 6870, 6992) ~ "52",
+      between(IND, 7070, 7190) ~ "53",
+      between(IND, 7270, 7490) ~ "54",
+      IND == 7570 ~ "55",
+      between(IND, 7580, 7790) ~ "56",
+      between(IND, 7860, 7890) ~ "61",
+      between(IND, 7970, 8470) ~ "62",
+      between(IND, 8560, 8590) ~ "71",
+      between(IND, 8660, 8690) ~ "72",
+      between(IND, 8770, 9290) ~ "81",
+      between(IND, 9370, 9590) ~ "92",
+      between(IND, 9670, 9870) ~ "928110",
+      IND == 9920 ~ "99"
+    )
+  )
+
+```
+
+
+# Join Titles
+
+```{r eval=TRUE}
+
+cpsORG <- left_join(cpsORG, OCC2010_titles, by = "OCC2010")
+
+```
+
+
+# Panels
+
+## Gender (OLD)
+
+```{r eval=FALSE}
+
+cpsSEX <- group_by(cpsORG, newsex, YEAR)
+
+cpsSEX <- summarise(cpsSEX, 
+                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+                     unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12))
+cpsSEX <- cpsSEX %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100)
+
+sex_union <- cpsSEX %>% group_by(newsex) %>% 
+  summarise(pct_union = mean(pctUNION))
+
+# NYC
+
+nyc_cpsSEX <- cpsORG %>% 
+  filter(NYC==1) %>% 
+  group_by(newsex, YEAR) %>% 
+  summarise(TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+            unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12)) %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100) %>% 
+  group_by(newsex) %>% 
+  summarise(NYC_pct = mean(pctUNION))
+
+# Join
+
+sex_union <- sex_union %>% left_join(nyc_cpsSEX)
+
+# Export
+
+openxlsx::write.xlsx(sex_union, "gender_union.xlsx")
+
+```
+
+# Panel Function
+
+## union_function
+
+```{r eval=TRUE}
+
+union_function <- function(x, data = cpsORG){
+  n_months <- data %>% summarise(count = n_distinct(y_m))
+  n_months <- n_months[1,1]
+  
+  df <- data %>% 
+  group_by({{x}}) %>% 
+  summarise(TotEMP = (sum(EARNWT, na.rm = TRUE)/n_months),
+            TotN = n(),
+            unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/n_months),
+            unionN = sum(unionMEM)) %>% 
+  mutate(USApctUNION = (unionEMP / TotEMP)*100)
+  
+  nyc_df <- data %>% 
+  filter(NYC==1) %>% 
+  group_by({{x}}) %>% 
+  summarise(NYC_TotEMP = (sum(EARNWT, na.rm = TRUE)/n_months),
+            NYC_TotN = n(),
+            NYC_unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/n_months),
+            NYC_unionN = sum(unionMEM)) %>%
+  mutate(NYC_pctUNION = (NYC_unionEMP / NYC_TotEMP)*100)
+  
+  df_join <- df %>% left_join(nyc_df)
+
+}
+
+```
+
+# Gender
+
+```{r eval=TRUE}
+
+gender_union <- union_function(x = newsex)
+
+```
+
+# Education
+
+```{r eval=TRUE}
+
+ed_union <- union_function(x = newedu)
+
+```
+
+# Ethnicity
+
+```{r eval=TRUE}
+
+eth_union <- union_function(x = ethnicity)
+
+```
+
+# Occupation
+
+```{r eval=TRUE}
+
+occ_union <- union_function(x = OCC2010)
+
+```
+## Occ Title Join
+
+```{r eval=TRUE}
+
+# OCC2010_titles <- read_csv(here("data/OCC2010_codes.csv"))
+
+occ_union <- left_join(occ_union, OCC2010_titles)
+
+```
+
+## Occ Groups
+
+```{r eval=TRUE}
+
+occ_groups <- union_function(OCC_cat_title)
+
+```
+
+#### Old Code
+
+```{r eval=FALSE}
+
+occ_groups <- occ_union %>%
+  group_by(OCC_CAT) %>% 
+  summarise(USA_pct = mean(USA_pct),
+            NYC_pct = mean(NYC_pct))
+
+```
+
+#### Occ Data Check
+
+```{r eval=FALSE}
+
+occ_groups_check <- union_check(OCC_cat_title)
+
+```
+
+# Industry
+
+```{r eval=TRUE}
+
+ind_groups <- union_function(IND_cat_title)
+
+```
+
+# Sector of Worker
+
+```{r eval=TRUE}
+
+sector_union <- union_function(sector_worker)
+
+```
+
+# Age Category
+
+```{r eval=TRUE}
+
+age_union <- union_function(age_cat)
+
+```
+
+
+# Export
+
+```{r eval=FALSE}
+
+# Workbook
+
+cps_unionstats <- createWorkbook()
+
+addWorksheet(cps_unionstats, "Occ Group")
+writeDataTable(cps_unionstats, sheet = "Occ Group", occ_groups, startCol = 1, startRow = 1)
+
+addWorksheet(cps_unionstats, "Occ")
+writeDataTable(cps_unionstats, sheet = "Occ", occ_union, startCol = 1, startRow = 1)
+
+addWorksheet(cps_unionstats, "Ind")
+writeDataTable(cps_unionstats, sheet = "Ind", ind_groups, startCol = 1, startRow = 1)
+
+addWorksheet(cps_unionstats, "Sector")
+writeDataTable(cps_unionstats, sheet = "Sector", sector_union, startCol = 1, startRow = 1)
+
+addWorksheet(cps_unionstats, "Gender")
+writeDataTable(cps_unionstats, sheet = "Gender", gender_union, startCol = 1, startRow = 1)
+
+addWorksheet(cps_unionstats, "Education")
+writeDataTable(cps_unionstats, sheet = "Education", ed_union, startCol = 1, startRow = 1)
+
+addWorksheet(cps_unionstats, "Ethnicity")
+writeDataTable(cps_unionstats, sheet = "Ethnicity", eth_union, startCol = 1, startRow = 1)
+
+# Save
+
+saveWorkbook(cps_unionstats, file = "union_stats.xlsx", overwrite = TRUE)
+
+```
+
+# srvyr
+
+```{r eval=FALSE}
+
+cps_srvyr <- cpsORG %>% as_survey_design(weights = EARNWT)
+
+```
+
+```{r eval=FALSE}
+
+srvy_eth_union <- cps_srvyr %>% group_by(ethnicity, unionMEM, YEAR) %>% summarise(pct = survey_mean())
+
+```
+
+# Monthly Approach
+
+I am going to pool everything! I will then divide sums by the number of year-months (variable "y_m" there are).
+
+THIS HAS BECOME THE MAIN APPROACH, the old code (grouping by year and dividing by 12, will be in the "Old by Year Code" section below)
+
+## Functions
+
+### union_function_pool
+
+I don't need this! It is for averaging over years, but I am pooling - so I will be using the union_check_pool function below as 'union_function'
+
+```{r eval=FALSE}
+
+union_function_pool <- function(x, data = cpsORG){
+  n_months <- data %>% summarise(count = n_distinct(y_m))
+  n_months <- n_months[1,1]
+  
+  df <- data %>% 
+  group_by({{x}}, YEAR) %>% 
+  summarise(TotEMP = (sum(EARNWT, na.rm = TRUE)/n_months),
+            unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/n_months)) %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100) %>% 
+  group_by({{x}}) %>% 
+  summarise(USA_pct = mean(pctUNION))
+  
+  nyc_df <- data %>% 
+  filter(NYC==1) %>% 
+  group_by({{x}}, YEAR) %>% 
+  summarise(TotEMP = (sum(EARNWT, na.rm = TRUE)/n_months),
+            unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/n_months)) %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100) %>% 
+  group_by({{x}}) %>% 
+  summarise(NYC_pct = mean(pctUNION))
+  
+  df_join <- df %>% left_join(nyc_df)
+
+}
+
+```
+
+#### union_check_pool
+
+Check the N's for the data.
+
+```{r eval=FALSE}
+
+union_check_pool <- function(x, data = cpsORG){
+  n_months <- data %>% summarise(count = n_distinct(y_m))
+  n_months <- n_months[1,1]
+  
+  df <- data %>% 
+  group_by({{x}}) %>% 
+  summarise(TotEMP = (sum(EARNWT, na.rm = TRUE)/n_months),
+            TotN = n(),
+            unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/n_months),
+            unionN = sum(unionMEM)) %>% 
+  mutate(USApctUNION = (unionEMP / TotEMP)*100)
+  
+  nyc_df <- data %>% 
+  filter(NYC==1) %>% 
+  group_by({{x}}) %>% 
+  summarise(NYC_TotEMP = (sum(EARNWT, na.rm = TRUE)/n_months),
+            NYC_TotN = n(),
+            NYC_unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/n_months),
+            NYC_unionN = sum(unionMEM)) %>%
+  mutate(NYC_pctUNION = (NYC_unionEMP / NYC_TotEMP)*100)
+  
+  df_join <- df %>% left_join(nyc_df)
+
+}
+
+```
+
+## Old by Year Code
+
+### OLD union_function
+
+```{r eval=FALSE}
+
+union_function <- function(x, data = cpsORG){
+  df <- data %>% 
+  group_by({{x}}, YEAR) %>% 
+  summarise(TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+            unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12)) %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100) %>% 
+  group_by({{x}}) %>% 
+  summarise(USA_pct = mean(pctUNION))
+  
+  nyc_df <- data %>% 
+  filter(NYC==1) %>% 
+  group_by({{x}}, YEAR) %>% 
+  summarise(TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+            unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12)) %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100) %>% 
+  group_by({{x}}) %>% 
+  summarise(NYC_pct = mean(pctUNION))
+  
+  df_join <- df %>% left_join(nyc_df)
+
+}
+
+```
+
+### OLD union_check
+
+Check the N's for the data.
+
+```{r eval=FALSE}
+
+union_check <- function(x, data = cpsORG){
+  df <- data %>% 
+  group_by({{x}}, YEAR) %>% 
+  summarise(TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+            TotN = n(),
+            unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12),
+            unionN = sum(unionMEM)) %>% 
+  mutate(USApctUNION = (unionEMP / TotEMP)*100)
+  
+  nyc_df <- data %>% 
+  filter(NYC==1) %>% 
+  group_by({{x}}, YEAR) %>% 
+  summarise(NYC_TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+            NYC_TotN = n(),
+            NYC_unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12),
+            NYC_unionN = sum(unionMEM)) %>%
+  mutate(NYC_pctUNION = (NYC_unionEMP / NYC_TotEMP)*100)
+  
+  df_join <- df %>% left_join(nyc_df)
+
+}
+
+```
+
+
+# PLOTS
+
+## Setup
+
+```{r eval=TRUE}
+
+#remove.packages("Rttf2pt1")
+#remotes::install_version("Rttf2pt1", version = "1.3.8")
+
+
+library(hrbrthemes)
+library(scales)
+
+library("ggthemes")
+library(extrafont)
+
+#extrafont::font_import()
+#extrafont::loadfonts()
+
+
+```
+
+## Testing
+
+```{r eval=FALSE}
+
+# plot
+
+occ_plot_test <- occ_groups %>% 
+  mutate(Occupation = str_remove(OCC_cat_title, "Occupations")) %>% 
+  mutate(Occupation = factor(Occupation, levels = Occupation)) %>% 
+  filter(NYC_unionN >= 70) %>% 
+  # Only over 18% (should give me top 10)
+  filter(NYC_pctUNION > 18) %>% 
+  mutate(Occupation = fct_reorder(Occupation, NYC_pctUNION)) %>% 
+  select(USApctUNION, NYC_pctUNION, Occupation) %>% 
+  rename(USA = USApctUNION, NYC = NYC_pctUNION) %>% 
+  pivot_longer(c(USA, NYC), names_to = "geo", values_to = "union_pct") %>% 
+  mutate(union_pct = round(union_pct, 1),
+         geo = factor(geo, levels = c("USA", "NYC"))) %>% 
+  arrange(union_pct) %>% 
+  ggplot(mapping = aes(x = Occupation, y = union_pct, fill = geo)) +
+  geom_col(position = "dodge") +
+#  geom_text(aes(label = union_pct), position = position_dodge(width = 0.9), hjust=-0.5) +
+  geom_text(aes(label = percent(union_pct, scale = 1, accuracy = .1)), position = position_dodge(width = 0.9), hjust=-0.5) +
+  coord_flip(ylim = c(0, 65)) +
+  #scale_x_discrete(labels = wrap_format(40)) +
+  labs(x= element_blank(), y="% Unionization",
+       title="Unionization by Occupation",
+       subtitle="Comparing Unionization by Occupational Groups, 2019-2022") + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_ptol("geo") +
+  #theme_minimal() +
+  theme_ipsum(grid = FALSE,
+              plot_margin = margin(10, 10, 10, 10),
+              plot_title_margin = 5,
+              subtitle_margin = 5) +
+  update_geom_font_defaults() +
+  theme(
+    legend.title = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    #plot.title = element_text(margin = margin(.5, .5, .5, .5))
+    #axis.title.x = element_text(size = rel(1.25))
+  )
+  
+plot(occ_plot_test) 
+  
+```
+
+```{r eval=FALSE}
+
+ggsave(here("LMIS_src/graphs/occupation_graph_test2.png"), plot = occ_plot_test, width = 7, height = 4, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```
+
+## Occupation
+
+### Chart 1
+
+Filter NYC_unionN >= 70
+
+Only over 18% (should give me top 10)
+  filter(NYC_pctUNION > 18) 
+
+```{r eval=TRUE}
+
+# plot
+
+occ_plot <- occ_groups %>% 
+  mutate(Occupation = str_remove(OCC_cat_title, "Occupations")) %>% 
+  mutate(Occupation = factor(Occupation, levels = Occupation)) %>% 
+  filter(NYC_unionN >= 70) %>% 
+  # Only over 18% (should give me top 10)
+  filter(NYC_pctUNION > 18) %>% 
+  mutate(Occupation = fct_reorder(Occupation, NYC_pctUNION)) %>% 
+  select(USApctUNION, NYC_pctUNION, Occupation) %>% 
+  rename(USA = USApctUNION, "NYC MSA" = NYC_pctUNION) %>% 
+  pivot_longer(c(USA, "NYC MSA"), names_to = "geo", values_to = "union_pct") %>% 
+  mutate(union_pct = round(union_pct, 1),
+         geo = factor(geo, levels = c("USA", "NYC MSA"))) %>% 
+  arrange(union_pct) %>% 
+  ggplot(mapping = aes(x = Occupation, y = union_pct, fill = geo)) +
+  geom_col(position = "dodge") +
+  coord_flip(ylim = c(0, 60)) +
+  scale_y_continuous(labels = percent_format(scale = 1, accuracy = 10)) +
+  #scale_x_discrete(labels = wrap_format(40)) +
+  labs(x= element_blank(), y="% Unionization",
+       title="Unionization by Occupation",
+       subtitle="Comparing Unionization by Occupational Groups, 2019-2022") + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_ptol("geo") +
+  theme_ipsum(grid = "X",
+              plot_margin = margin(10, 10, 10, 10),
+              plot_title_margin = 5,
+              subtitle_margin = 5) +
+  update_geom_font_defaults() +
+  theme(
+    legend.title = element_blank(),
+    axis.title.x = element_text(size = rel(1.25))
+  )
+  
+plot(occ_plot) 
+  
+```
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, width = 7, height = 4, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```
+
+#### Testing Size
+
+```{r eval=FALSE}
+
+ggsave(here("LMIS_src/graphs/occupation_graph_TEST.png"), plot = occ_plot, width = 7, height = 4.5, bg = "#fbf7ea")
+
+```
+
+
+### Chart 2
+
+```{r eval=TRUE}
+
+# plot
+
+occ_plot2 <- occ_groups %>% 
+  mutate(Occupation = str_remove(OCC_cat_title, "Occupations")) %>% 
+  mutate(Occupation = factor(Occupation, levels = Occupation)) %>% 
+  filter(NYC_unionN >= 70) %>% 
+  # Only over 18% (should give me top 10)
+  filter(NYC_pctUNION > 18) %>% 
+  mutate(Occupation = fct_reorder(Occupation, NYC_pctUNION)) %>% 
+  select(USApctUNION, NYC_pctUNION, Occupation) %>% 
+  rename(USA = USApctUNION, "NYC MSA" = NYC_pctUNION) %>% 
+  pivot_longer(c(USA, "NYC MSA") , names_to = "geo", values_to = "union_pct") %>% 
+  mutate(union_pct = round(union_pct, 1),
+         geo = factor(geo, levels = c("USA",  "NYC MSA"))) %>% 
+  arrange(union_pct) %>% 
+  ggplot(mapping = aes(x = Occupation, y = union_pct, fill = geo)) +
+  geom_col(position = "dodge") +
+#  geom_text(aes(label = union_pct), position = position_dodge(width = 0.9), hjust=-0.5) +
+  geom_text(aes(label = percent(union_pct, scale = 1, accuracy = .1)), position = position_dodge(width = 0.9), hjust=-0.5) +
+  coord_flip(ylim = c(0, 62)) +
+  #scale_x_discrete(labels = wrap_format(40)) +
+  labs(x= element_blank(), y="% Unionization",
+       title="Unionization by Occupation",
+       subtitle="Comparing Unionization by Occupational Groups, 2019-2022") + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_ptol("geo") +
+  #theme_minimal() +
+  theme_ipsum(grid = FALSE,
+              plot_margin = margin(10, 10, 10, 10),
+              plot_title_margin = 5,
+              subtitle_margin = 5) +
+  update_geom_font_defaults() +
+  theme(
+    legend.title = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    #plot.title = element_text(margin = margin(.5, .5, .5, .5))
+    axis.title.x = element_text(size = rel(1.25))
+  )
+  
+plot(occ_plot2) 
+  
+```
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/occupation_graph2.png"), plot = occ_plot2, width = 7, height = 4, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```
+
+## Industry
+
+### Chart 1
+
+Filter NYC_unionN >= 70
+
+This filter gives me 10. 
+
+```{r eval=TRUE}
+
+# plot
+
+ind_plot <- ind_groups %>% 
+  mutate(Industry = factor(IND_cat_title, levels = IND_cat_title)) %>% 
+  filter(NYC_unionN >= 70) %>% 
+  mutate(Industry = fct_reorder(Industry, NYC_pctUNION)) %>% 
+  select(USApctUNION, NYC_pctUNION, Industry) %>% 
+  rename(USA = USApctUNION, "NYC MSA" = NYC_pctUNION) %>% 
+  pivot_longer(c(USA, "NYC MSA") , names_to = "geo", values_to = "union_pct") %>% 
+  mutate(union_pct = round(union_pct, 1),
+         geo = factor(geo, levels = c("USA",  "NYC MSA"))) %>% 
+  arrange(union_pct) %>% 
+  ggplot(mapping = aes(x = Industry, y = union_pct, fill = geo)) +
+  geom_col(position = "dodge") +
+  coord_flip(ylim = c(0, 60)) +
+  scale_y_continuous(labels = percent_format(scale = 1, accuracy = 10)) +
+  #scale_x_discrete(labels = wrap_format(40)) +
+  labs(x= element_blank(), y="% Unionization",
+       title="Unionization by Industry",
+       subtitle="Comparing Unionization by Industry Sectors, 2019-2022") + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_ptol("geo") +
+  theme_ipsum(grid = "X",
+              plot_margin = margin(10, 10, 10, 10),
+              plot_title_margin = 5,
+              subtitle_margin = 5) +
+  update_geom_font_defaults() +
+  theme(
+    legend.title = element_blank(),
+    axis.title.x = element_text(size = rel(1.25))
+  )
+  
+plot(ind_plot) 
+  
+```
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/industry_graph.png"), plot = ind_plot, width = 7, height = 4, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```
+
+### Chart 2
+
+```{r eval=TRUE}
+
+# plot
+
+ind_plot2 <- ind_groups %>% 
+  mutate(Industry = factor(IND_cat_title, levels = IND_cat_title)) %>% 
+  filter(NYC_unionN >= 70) %>% 
+  mutate(Industry = fct_reorder(Industry, NYC_pctUNION)) %>% 
+  select(USApctUNION, NYC_pctUNION, Industry) %>% 
+  rename(USA = USApctUNION, "NYC MSA" = NYC_pctUNION) %>% 
+  pivot_longer(c(USA, "NYC MSA") , names_to = "geo", values_to = "union_pct") %>% 
+  mutate(union_pct = round(union_pct, 1),
+         geo = factor(geo, levels = c("USA",  "NYC MSA"))) %>% 
+  arrange(union_pct) %>% 
+  ggplot(mapping = aes(x = Industry, y = union_pct, fill = geo)) +
+  geom_col(position = "dodge") +
+#  geom_text(aes(label = union_pct), position = position_dodge(width = 0.9), hjust=-0.5) +
+  geom_text(aes(label = percent(union_pct, scale = 1, accuracy = .1)), position = position_dodge(width = 0.9), hjust=-0.5) +
+  coord_flip(ylim = c(0, 65)) +
+  #scale_x_discrete(labels = wrap_format(40)) +
+  labs(x= element_blank(), y="% Unionization",
+       title="Unionization by Industry",
+       subtitle="Comparing Unionization by Industry Sectors, 2019-2022") + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_ptol("geo") +
+  #theme_minimal() +
+  theme_ipsum(grid = FALSE,
+              plot_margin = margin(10, 10, 10, 10),
+              plot_title_margin = 5,
+              subtitle_margin = 5) +
+  update_geom_font_defaults() +
+  theme(
+    legend.title = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    #plot.title = element_text(margin = margin(.5, .5, .5, .5))
+    axis.title.x = element_text(size = rel(1.25))
+  )
+  
+plot(ind_plot2) 
+  
+```
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/industry_graph2.png"), plot = ind_plot2, width = 7, height = 4, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```
+
+## Education
+
+### Chart 1
+
+```{r eval=TRUE}
+
+# plot
+
+ed_plot <- ed_union %>% 
+  mutate(Education = factor(newedu, levels = newedu)) %>% 
+  filter(NYC_unionN >= 70) %>% 
+  mutate(Education = fct_rev(Education)) %>% 
+  select(USApctUNION, NYC_pctUNION, Education) %>% 
+  rename(USA = USApctUNION, "NYC MSA" = NYC_pctUNION) %>% 
+  pivot_longer(c(USA, "NYC MSA") , names_to = "geo", values_to = "union_pct") %>% 
+  mutate(union_pct = round(union_pct, 1),
+         geo = factor(geo, levels = c("USA",  "NYC MSA"))) %>% 
+  arrange(union_pct) %>% 
+  ggplot(mapping = aes(x = Education, y = union_pct, fill = geo)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_y_continuous(labels = percent_format(scale = 1, accuracy = 10)) +
+  #scale_x_discrete(labels = wrap_format(40)) +
+  labs(x= element_blank(), y="% Unionization",
+       title="Unionization by Education",
+       subtitle="Comparing Unionization by Education Level, 2019-2022") + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_ptol("geo") +
+  theme_ipsum(grid = "X",
+              plot_margin = margin(10, 10, 10, 10),
+              plot_title_margin = 5,
+              subtitle_margin = 5) +
+  update_geom_font_defaults() +
+  theme(
+    legend.title = element_blank(),
+    axis.title.x = element_text(size = rel(1.25))
+  )
+  
+plot(ed_plot) 
+  
+```
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/education_graph.png"), plot = ed_plot, width = 7, height = 4, bg = "#fbf7ea")
+
+```
+
+### Chart 2
+
+```{r eval=TRUE}
+
+# plot
+
+ed_plot2 <- ed_union %>% 
+  mutate(Education = factor(newedu, levels = newedu)) %>% 
+  filter(NYC_unionN >= 70) %>% 
+  mutate(Education = fct_rev(Education)) %>% 
+  select(USApctUNION, NYC_pctUNION, Education) %>% 
+  rename(USA = USApctUNION, "NYC MSA" = NYC_pctUNION) %>% 
+  pivot_longer(c(USA, "NYC MSA") , names_to = "geo", values_to = "union_pct") %>% 
+  mutate(union_pct = round(union_pct, 1),
+         geo = factor(geo, levels = c("USA",  "NYC MSA"))) %>% 
+  arrange(union_pct) %>% 
+  ggplot(mapping = aes(x = Education, y = union_pct, fill = geo)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = percent(union_pct, scale = 1, accuracy = .1)), position = position_dodge(width = 0.9), hjust=-0.5) +
+  coord_flip(ylim = c(0, 30)) +
+  scale_y_continuous(labels = percent_format(scale = 1, accuracy = 10)) +
+  #scale_x_discrete(labels = wrap_format(40)) +
+  labs(x= element_blank(), y="% Unionization",
+       title="Unionization by Education",
+       subtitle="Comparing Unionization by Education Level, 2019-2022") + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_ptol("geo") +
+  #theme_minimal() +
+  theme_ipsum(grid = FALSE,
+              plot_margin = margin(10, 10, 10, 10),
+              plot_title_margin = 5,
+              subtitle_margin = 5) +
+  update_geom_font_defaults() +
+  theme(
+    legend.title = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    #plot.title = element_text(margin = margin(.5, .5, .5, .5))
+    axis.title.x = element_text(size = rel(1.25))
+  )
+  
+plot(ed_plot2) 
+  
+```
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/education_graph2.png"), plot = ed_plot2, width = 7, height = 4, bg = "#fbf7ea")
+
+```
+
+## Sector
+
+### Chart 1
+
+Filter NYC_unionN >= 70
+
+```{r eval=TRUE}
+
+# plot
+
+sect_plot <- sector_union %>% 
+  mutate(Sector = str_remove(sector_worker, " Worker")) %>% 
+  mutate(Sector = factor(Sector, levels = Sector)) %>% 
+  filter(NYC_unionN >= 70) %>% 
+  mutate(Sector = fct_reorder(Sector, NYC_pctUNION)) %>% 
+  select(USApctUNION, NYC_pctUNION, Sector) %>% 
+  rename(USA = USApctUNION, "NYC MSA" = NYC_pctUNION) %>% 
+  pivot_longer(c(USA, "NYC MSA") , names_to = "geo", values_to = "union_pct") %>% 
+  mutate(union_pct = round(union_pct, 1),
+         geo = factor(geo, levels = c("USA",  "NYC MSA"))) %>% 
+  arrange(union_pct) %>% 
+  ggplot(mapping = aes(x = Sector, y = union_pct, fill = geo)) +
+  geom_col(position = "dodge") +
+  coord_flip(ylim = c(0, 60)) +
+  scale_y_continuous(labels = percent_format(scale = 1, accuracy = 10)) +
+  #scale_x_discrete(labels = wrap_format(40)) +
+  labs(x= element_blank(), y="% Unionization",
+       title="Unionization by Sector",
+       subtitle="Comparing Unionization by Public vs Private Sector, 2019-2022") + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_ptol("geo") +
+  theme_ipsum(grid = "X") +
+  update_geom_font_defaults() +
+  theme(
+    legend.title = element_blank(),
+    axis.title.x = element_text(size = rel(1.25))
+  )
+  
+plot(sect_plot) 
+  
+```
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/sector_graph.png"), plot = sect_plot, width = 6, height = 3, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```
+
+### Chart 2
+
+```{r eval=TRUE}
+
+# plot
+
+sect_plot2 <- sector_union %>% 
+  mutate(Sector = str_remove(sector_worker, " Worker")) %>% 
+  mutate(Sector = factor(Sector, levels = Sector)) %>% 
+  filter(NYC_unionN >= 70) %>% 
+  mutate(Sector = fct_reorder(Sector, NYC_pctUNION)) %>% 
+  select(USApctUNION, NYC_pctUNION, Sector) %>% 
+  rename(USA = USApctUNION, "NYC MSA" = NYC_pctUNION) %>% 
+  pivot_longer(c(USA, "NYC MSA") , names_to = "geo", values_to = "union_pct") %>% 
+  mutate(union_pct = round(union_pct, 1),
+         geo = factor(geo, levels = c("USA",  "NYC MSA"))) %>% 
+  arrange(union_pct) %>% 
+  ggplot(mapping = aes(x = Sector, y = union_pct, fill = geo)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = percent(union_pct, scale = 1, accuracy = .1)), position = position_dodge(width = 0.9), hjust=-0.5) +
+  coord_flip(ylim = c(0, 75)) +
+  scale_y_continuous(labels = percent_format(scale = 1, accuracy = 10)) +
+  #scale_x_discrete(labels = wrap_format(40)) +
+  labs(x= element_blank(), y="% Unionization",
+       title="Unionization by Sector",
+       subtitle="Comparing Unionization by Public vs Private Sector, 2019-2022") + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_ptol("geo") +
+  #theme_minimal() +
+  theme_ipsum(grid = FALSE) +
+  update_geom_font_defaults() +
+  theme(
+    legend.title = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    #plot.title = element_text(margin = margin(.5, .5, .5, .5))
+    axis.title.x = element_text(size = rel(1.25))
+  )
+  
+plot(sect_plot2)
+  
+```
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/sector_graph2.png"), plot = sect_plot2, width = 6, height = 3, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```
+
+## Age
+
+### Chart 1
+
+```{r eval=TRUE}
+
+# plot
+
+age_plot <- age_union %>% 
+  filter(!is.na(age_cat)) %>% 
+  mutate(Age = factor(age_cat, levels = age_cat)) %>% 
+ #filter(NYC_unionN >= 70) %>% 
+  mutate(Age = fct_rev(Age)) %>%
+  select(USApctUNION, NYC_pctUNION, Age) %>% 
+  rename(USA = USApctUNION, "NYC MSA" = NYC_pctUNION) %>% 
+  pivot_longer(c(USA, "NYC MSA") , names_to = "geo", values_to = "union_pct") %>% 
+  mutate(union_pct = round(union_pct, 1),
+         geo = factor(geo, levels = c("USA",  "NYC MSA"))) %>% 
+  arrange(union_pct) %>% 
+  ggplot(mapping = aes(x = Age, y = union_pct, fill = geo)) +
+  geom_col(position = "dodge") +
+  coord_flip(ylim = c(0, 27)) +
+  scale_y_continuous(labels = percent_format(scale = 1, accuracy = 10)) +
+  #scale_x_discrete(labels = wrap_format(40)) +
+  labs(x= element_blank(), y="% Unionization",
+       title="Unionization by Age",
+       subtitle="Comparing Unionization by Age Group, 2019-2022") + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_ptol("geo") +
+  theme_ipsum(grid = "X",
+              plot_title_margin = 5,
+              subtitle_margin = 5) +
+  update_geom_font_defaults() +
+  theme(
+    legend.title = element_blank(),
+    axis.title.x = element_text(size = rel(1.25))
+  )
+  
+plot(age_plot) 
+  
+```
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/age_graph.png"), plot = age_plot, width = 7, height = 4, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```
+
+### Chart 2
+
+```{r eval=TRUE}
+
+# plot
+
+age_plot2 <- age_union %>% 
+  filter(!is.na(age_cat)) %>% 
+  mutate(Age = factor(age_cat, levels = age_cat)) %>% 
+ #filter(NYC_unionN >= 70) %>% 
+  mutate(Age = fct_rev(Age)) %>%
+  select(USApctUNION, NYC_pctUNION, Age) %>% 
+  rename(USA = USApctUNION, "NYC MSA" = NYC_pctUNION) %>% 
+  pivot_longer(c(USA, "NYC MSA") , names_to = "geo", values_to = "union_pct") %>% 
+  mutate(union_pct = round(union_pct, 1),
+         geo = factor(geo, levels = c("USA",  "NYC MSA"))) %>% 
+  arrange(union_pct) %>% 
+  ggplot(mapping = aes(x = Age, y = union_pct, fill = geo)) +
+  geom_col(position = "dodge") +
+#  geom_text(aes(label = union_pct), position = position_dodge(width = 0.9), hjust=-0.5) +
+  geom_text(aes(label = percent(union_pct, scale = 1, accuracy = .1)), position = position_dodge(width = 0.9), hjust=-0.5) +
+  coord_flip(ylim = c(0, 30)) +
+  #scale_x_discrete(labels = wrap_format(40)) +
+  labs(x= element_blank(), y="% Unionization",
+       title="Unionization by Age",
+       subtitle="Comparing Unionization by Age Group, 2019-2022") + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_ptol("geo") +
+  #theme_minimal() +
+  theme_ipsum(grid = FALSE,
+              plot_title_margin = 5,
+              subtitle_margin = 5) +
+  update_geom_font_defaults() +
+  theme(
+    legend.title = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    #plot.title = element_text(margin = margin(.5, .5, .5, .5))
+    axis.title.x = element_text(size = rel(1.25))
+  )
+  
+plot(age_plot2) 
+  
+```
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/age_graph2.png"), plot = age_plot2, width = 7, height = 4, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```
+
+
+# Other Charts
+
+## Industry Scatterplot
+
+### Testing
+
+```{r eval=FALSE}
+
+industry_highlight <- c(
+  "Educational Services", "Health Care and Social Assistance", "Public Administration"
+)
+
+# plot
+
+ind_scatter <- ind_groups %>% 
+  mutate(highlight = ifelse(IND_cat_title %in% industry_highlight, IND_cat_title, "")) %>%
+  mutate(Industry = factor(IND_cat_title, levels = IND_cat_title)) %>% 
+  filter(NYC_unionN >= 70) %>% 
+  ggplot(aes(x = NYC_TotEMP, y = NYC_unionEMP, size = NYC_pctUNION, colour = Industry)) +
+  geom_point(alpha = 0.5) +
+  ggrepel::geom_text_repel(
+    aes(label = highlight),
+    color = "black",
+    size = 9/.pt, # font size 9 pt
+    point.padding = 0.1, 
+    box.padding = 0.6,
+    min.segment.length = 0,
+    max.overlaps = 1000,
+    seed = 7654 # For reproducibility reasons
+  ) +
+  scale_size(range = c(2, 30), name = element_blank()) +
+  scale_colour_ptol("Industry") +
+  guides(size = "none") +
+  theme_ipsum(grid = FALSE) +
+  update_geom_font_defaults()
+
+plot(ind_scatter)
+
+```
+
+```{r eval=FALSE}
+
+industry_highlight <- c(
+  "Educational Services", "Health Care and Social Assistance", "Public Administration"
+)
+
+# plot
+
+ind_scatter2 <- ind_groups %>% 
+  mutate(highlight = ifelse(IND_cat_title %in% industry_highlight, IND_cat_title, "")) %>%
+  mutate(Industry = factor(IND_cat_title, levels = IND_cat_title)) %>% 
+  filter(NYC_unionN >= 70) %>% 
+  ggplot(aes(x = NYC_TotEMP, y = NYC_unionEMP, color = NYC_pctUNION)) +
+  geom_point(size = 5) +
+  ggrepel::geom_text_repel(
+    aes(label = highlight),
+    color = "black",
+    size = 9/.pt, # font size 9 pt
+    point.padding = 0.1, 
+    box.padding = 0.6,
+    min.segment.length = 0,
+    max.overlaps = 1000,
+    seed = 7654 # For reproducibility reasons
+  ) +
+  #scale_size(range = c(2, 30), name = element_blank()) +
+  #scale_colour_ptol("Industry") +
+  #guides(size = "none") +
+  theme_ipsum(grid = FALSE) +
+  update_geom_font_defaults()
+
+plot(ind_scatter2)
+
+```
+
+## Ind Emp Bar
+
+### NOTE!!!
+
+I need to figure out what to divide these by!!!!!
+
+Okay - looks like employment is divided by the number of months?? Does this check out?
+
+Is it like the monthly average??
+
+### Plot
+
+```{r eval = TRUE}
+
+# Plot
+
+ind_EMP_bar <- ind_groups %>% 
+  mutate(Industry = factor(IND_cat_title, levels = IND_cat_title)) %>% 
+  filter(NYC_unionN >= 70) %>% 
+  mutate(Industry = fct_reorder(Industry, NYC_TotEMP)) %>% 
+  select(NYC_TotEMP, NYC_unionEMP, Industry) %>% 
+  rename(Tot_Emp = NYC_TotEMP, Union_Emp = NYC_unionEMP) %>% 
+  pivot_longer(c(Tot_Emp, Union_Emp), names_to = "union", values_to = "emp") %>% 
+  mutate(#union_pct = round(union_pct, 1),
+         union = factor(union, levels = c("Union_Emp", "Tot_Emp"))) %>% 
+  arrange(emp) %>% 
+  ggplot(mapping = aes(x = Industry, y = emp, fill = union)) +
+  geom_col(position = "dodge") +
+#  geom_text(aes(label = union_pct), position = position_dodge(width = 0.9), hjust=-0.5) +
+  geom_text(aes(label = comma(emp, accuracy = 1, scale = .001, suffix = "k")), position = position_dodge(width = 0.9), hjust=-0.3) +
+  coord_flip(ylim = c(0,1510000)) +
+  #scale_x_discrete(labels = wrap_format(40)) +
+  labs(x= element_blank(), y=element_blank(),
+       title="Industries in the New York City Metro Area",
+       subtitle="Comparing Total with Unionized Employment in NYC MSA, 2019-2022",
+       fill = "Employment") + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_manual(values = c("#CC6677", "#4477AA"), labels = c("Unionized", "Total")) +
+  #theme_minimal() +
+  theme_ipsum(grid = FALSE,
+              plot_margin = margin(10, 10, 10, 10),
+              plot_title_margin = 5,
+              subtitle_margin = 5) +
+  update_geom_font_defaults() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    #plot.title = element_text(margin = margin(.5, .5, .5, .5))
+    axis.title.x = element_text(size = rel(1.25))
+  )
+  
+plot(ind_EMP_bar) 
+
+```
+### Save
+
+```{r eval=TRUE}
+
+ggsave(here("LMIS_src/graphs/industry_emp.png"), plot = ind_EMP_bar, width = 7.5, height = 4, bg = "#fbf7ea")
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.png"), plot = occ_plot, bg = "#ebd999")
+
+  # BG Colors: #ebd999, (lighter one) #fbf7ea
+
+# ggsave(here("LMIS_src/graphs/occupation_graph.pdf"), plot = occ_plot, device = cairo_pdf())
+
+```

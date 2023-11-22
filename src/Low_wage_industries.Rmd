@@ -1,0 +1,388 @@
+---
+title: "CPS Low Wage Industries"
+author: "Sam Neylon"
+date: '2022-08-07'
+output: html_document
+---
+
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#### Using "here" to keep project directory as working directory
+#### NOTE: Rmarkdown will try to make the file it is inside the working directory, but "here" should fix it.
+
+library(here)
+library(tidyverse)
+library(data.table)
+library(DBI)
+library(Hmisc)
+library(pacman)
+library(ggplot2)
+library(plm)
+
+```
+
+# Chunk Setup
+
+knitr allows you to turn chunks on and off collectively - you can make eval=[variable] and then set the variable.
+
+This doesn't work for interactive R Studio.
+
+Instead I will use find and replace to mass change them. Currently, they have "eval=TRUE, [group name]", and I can mass change by searching eval=TRUE, [group name] and changing TRUE to false.
+
+Groups:
+
+* Setup Chunks (for any analysis)
+eval=TRUE, evalSetup
+
+* Chunks I used for first draft of Qualifying Paper
+eval=FALSE, evalQP1
+
+* Chunks for QP 1, but after the Interplot fix - i.e. the marginal analysis I did
+eval=FALSE, evalInterplot
+
+* Chunks for Non-mgmt average wage
+eval=TRUE, evalAvgNM
+
+* Interplot 2 - average NM wages marginal analysis
+eval=FALSE, evalInterplot
+
+# Weighted Quantile Function
+
+Apparently the Hmisc package is broken, when it comes to weighted quantiles - so this angry guy fixed it: https://github.com/harrelfe/Hmisc/issues/97#issuecomment-661793822
+
+Here is his code:
+
+```{r eval=TRUE}
+
+wtd.quantile<- function (x, weights = NULL, probs = c(0, 0.25, 0.5, 0.75, 1),
+                         type = c("quantile", "(i-1)/(n-1)", "i/(n+1)", "i/n"),
+                         na.rm = TRUE)  {
+  # Function taken from HMISC, but issue solved which is documented here: https://github.com/harrelfe/Hmisc/issues/97#issuecomment-429634634
+  normwt = FALSE
+  if (!length(weights))      return(quantile(x, probs = probs, na.rm = na.rm))
+  type <- match.arg(type)
+  if (any(probs < 0 | probs > 1))      stop("Probabilities must be between 0 and 1 inclusive")
+  nams <- paste(format(round(probs * 100, if (length(probs) >
+                                              1) 2 - log10(diff(range(probs))) else 2)), "%", sep = "")
+
+  if(na.rm & any(is.na(weights))){   ###### new
+    i<- is.na(weights)
+    x <- x[!i]
+    weights <- weights[!i]
+  }
+  i <- weights <= 0         # nwe: kill negative and zero weights and associated data
+  if (any(i)) {
+    x <- x[!i]
+    weights <- weights[!i]
+  }
+  if (type == "quantile") {
+    if(sum(weights) < 1000000 ) {weights<- weights*1000000/sum(weights)}  ##### new
+    w <- wtd.table(x, weights, na.rm = na.rm, normwt = normwt,
+                   type = "list")
+    x <- w$x
+    wts <- w$sum.of.weights
+    n <- sum(wts)
+    order <- 1 + (n - 1) * probs
+    low <- pmax(floor(order), 1)
+    high <- pmin(low + 1, n)
+    order <- order%%1
+    allq <- approx(cumsum(wts), x, xout = c(low, high), method = "constant",
+                   f = 1, rule = 2)$y
+    k <- length(probs)
+    quantiles <- (1 - order) * allq[1:k] + order * allq[-(1:k)]
+    names(quantiles) <- nams
+    return(quantiles)
+  }
+  w <- wtd.Ecdf(x, weights, na.rm = na.rm, type = type, normwt = normwt)
+  structure(approx(w$ecdf, w$x, xout = probs, rule = 2)$y,
+            names = nams)
+}
+
+
+
+
+wtd.table<- function (x, weights = NULL, type = c("list", "table"), normwt = FALSE,
+                      na.rm = TRUE) {
+  # Function taken from HMISC, but issue solved which is documented here: https://github.com/harrelfe/Hmisc/issues/97#issuecomment-429634634
+  p_load(timeDate)
+  type <- match.arg(type)
+  if (!length(weights))
+    weights <- rep(1, length(x))
+  isdate <- ( class(x)[1]=="Date"  | class(x)[1]=="POSIXct") ### MODIFIED
+  ax <- attributes(x)
+  ax$names <- NULL
+  if (is.character(x))
+    x <- as.factor(x)
+  lev <- levels(x)
+  x <- unclass(x)
+  if (na.rm) {
+    s <- !is.na(x + weights)
+    x <- x[s, drop = FALSE]
+    weights <- weights[s]
+  }
+  n <- length(x)
+  if (normwt)
+    weights <- weights * length(x)/sum(weights)
+  i <- order(x)
+  x <- x[i]
+  weights <- weights[i]
+  if (anyDuplicated(x)) {
+    weights <- tapply(weights, x, sum)
+    if (length(lev)) {
+      levused <- lev[sort(unique(x))]
+      if ((length(weights) > length(levused)) && any(is.na(weights)))
+        weights <- weights[!is.na(weights)]
+      if (length(weights) != length(levused))
+        stop("program logic error")
+      names(weights) <- levused
+    }
+    if (!length(names(weights)))
+      stop("program logic error")
+    if (type == "table")
+      return(weights)
+    #x <-  all.is.numeric(names(weights), "vector")#  modified: commented out. function checked whether all are numeric and if yes returned the weights
+    if (isdate)      attributes(x) <- c(attributes(x), ax)
+    x_out<- as.numeric(names(weights))
+    names(weights) <- NULL
+    return(list(x = x_out, sum.of.weights = weights))
+  }
+  xx <- x
+  if (isdate)
+    attributes(xx) <- c(attributes(xx), ax)
+  if (type == "list")
+    list(x = if (length(lev)) lev[x] else xx, sum.of.weights = weights)
+  else {
+    names(weights) <- if (length(lev))
+      lev[x]
+    else xx
+    weights
+  }
+}
+
+wtd.mean <- function (x, weights = NULL, normwt = "ignored", na.rm = TRUE) {
+  # Function taken from HMISC, but issue solved which is documented here: https://github.com/harrelfe/Hmisc/issues/97#issuecomment-429634634
+  if (!length(weights))
+    return(mean(x, na.rm = na.rm))
+  if (na.rm) {
+    s <- !is.na(x + weights)
+    x <- x[s]
+    weights <- weights[s]
+  }
+  sum(weights * x)/sum(weights)
+}
+
+
+```
+
+
+
+# CPS Cleaning
+
+(Taken from "CPS_QP_Clean.Rmd")
+
+## Notes on SQLite
+
+Because the data file is so large, I decided to access it as an SQLite database, instead of loading it into memory.
+
+Information on this is below.
+
+*NOTE: In the future, when I understand SQL, I should rewrite the code, as I could more easily extract just the outgoing groups (which requires loading the database with "integer" columns) in SQL, and leave other stuff to R. For now, I will be doing it in dplyr.
+
+## RSQLite Code
+
+```{r eval=TRUE, evalSetup}
+
+# This code establishes a connection with my database
+# See: https://data.library.virginia.edu/creating-a-sqlite-database-for-use-with-r/
+
+con <- dbConnect(RSQLite::SQLite(), here("data/IPUMS_CPS/cps_master.db"))
+
+# This allows dplyr to use the connection like an object:
+
+cpsALL <- tbl(con, "cpsALL")
+
+```
+
+### Disconnect SQLite
+
+Run this code to disconnect from the database
+
+```{r eval=FALSE}
+
+dbDisconnect(con)
+
+```
+
+### CPI99
+
+When downloading from IPUMS, I forgot to download the CPI99 variable, which enables easy conversion into 1999 dollars. Instead, I have gotten the values of CPI99 for each year, and put them in a separate csv, which I will join with the total data set.
+
+CPI99 values: https://cps.ipums.org/cps/cpi99.shtml
+
+I will create inflation adjusted variables in sections below.
+
+```{r eval=TRUE, evalSetup}
+
+CPIdata <- read_csv(here("data/CPI99.csv"))
+
+```
+
+
+## Data Set up
+
+Seems like Kristal 2017 uses 90/10 ratio as measure of inequality
+
+WARNING: EPI argue that you need to bin before using quantiles, since wages clump at certain values: https://www.epi.org/data/methodology/ (see "Wage Percentiles" section)
+
+
+```{r eval=TRUE, evalSetup}
+
+# Create ORG Microdata
+
+# list of variables:
+
+cpsORG <- cpsALL %>% 
+  filter(ELIGORG == 1, between(CLASSWKR, 20, 28)) %>% 
+  mutate(unionMEM = if_else(UNION == 2, 1, 0),
+         manager = if_else(OCC2010 >= 10 & OCC2010 <= 430, 1, 0),
+         EARNWEEK2 = if_else(EARNWEEK >= 9999, NA_integer_,
+                             if_else(EARNWEEK > 1923, 1923, EARNWEEK)),
+         HOURWAGE2 = if_else(HOURWAGE != 999.99, HOURWAGE, NA_integer_),
+         UHRSWORK1_2 = if_else(UHRSWORK1 == 999 | UHRSWORK1 == 997 | UHRSWORK1 == 0, NA_integer_, UHRSWORK1),
+         hrWAGE2 = if_else(PAIDHOUR == 2, HOURWAGE2,
+                           if_else(PAIDHOUR == 1, (EARNWEEK2 / UHRSWORK1_2), NA_integer_))) %>% 
+  filter(hrWAGE2 > 1, UHRSWORK1_2 > 16) %>% 
+  mutate(mgmtWAGE = if_else(manager == 1, hrWAGE2, NA_integer_),
+         NONmgmtWAGE = if_else(manager == 0, hrWAGE2, NA_integer_),
+         ln_hrWAGE2 = log(hrWAGE2),
+         ln_mgmtWAGE = log(mgmtWAGE),
+         ln_NONmgmtWAGE = log(NONmgmtWAGE)
+         ) %>% 
+  select(ELIGORG, YEAR, unionMEM, manager, HOURWAGE2, UHRSWORK1_2, hrWAGE2, PAIDHOUR, IND1990, OCC2010, EARNWT, mgmtWAGE, NONmgmtWAGE, ln_hrWAGE2, ln_mgmtWAGE, ln_NONmgmtWAGE) %>% 
+  collect()
+
+## view(head(cpsORG, 300))
+
+
+# Another way to check:
+
+## cpsCHECK <- slice_sample(cpsORG, n = 100) %>% collect()
+
+# Checking on the WKSWORKORG variable - since my "head" has a lot of "1" weeks worked...
+
+## wksCOUNT <- cpsORG %>% count(WKSWORKORG) %>% collect()
+
+# NOTE: Looks like it's all good - most people either work 52 weeks a year, or are 0 (not in universe)
+  
+# Add CPI99 inflation information
+
+cpsORG <- cpsORG %>% inner_join(CPIdata, by = "YEAR") %>% 
+  mutate(INFLhrWAGE2 = hrWAGE2*CPI99,
+         inflNMwage = ifelse(manager == 0, INFLhrWAGE2, NA_integer_))
+
+```
+
+# Industry Panels (F)
+
+Not using for this analysis - but pasted here in case I need.
+
+```{r eval = F}
+
+# Create Industry Panel
+
+cpsDATA <- group_by(cpsORG, IND1990, YEAR)
+
+cpsDATA <- summarise(cpsDATA, 
+                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+                     unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12),
+                     mgmtEMP = (sum(EARNWT * manager, na.rm = TRUE)/12), 
+                     avgWAGE = weighted.mean(hrWAGE2, EARNWT, na.rm = TRUE),
+                     NONmgmtAVG = weighted.mean(NONmgmtWAGE, EARNWT, na.rm = TRUE),
+                     mgmtAVG = weighted.mean(mgmtWAGE, EARNWT, na.rm = TRUE),
+                     ln_avgWAGE = weighted.mean(ln_hrWAGE2, EARNWT, na.rm = TRUE),
+                     ln_NONmgmtAVG = weighted.mean(ln_NONmgmtWAGE, EARNWT, na.rm = TRUE),
+                     ln_mgmtAVG = weighted.mean(ln_mgmtWAGE, EARNWT, na.rm = TRUE),
+                     var_wages = wtd.var(ln_hrWAGE2, EARNWT, na.rm = TRUE),
+                     Wage90 = wtd.quantile(hrWAGE2, EARNWT, probs = .9, na.rm = TRUE),
+                     Wage10 = wtd.quantile(hrWAGE2, EARNWT, probs = .1, na.rm = TRUE),
+                     inflNMavg = weighted.mean(NONmgmtWAGE, EARNWT, na.rm = TRUE))
+
+cpsDATA <- ungroup(cpsDATA)
+
+# Drop big ole data set
+
+rm(cpsORG)
+
+
+# Create New Variables
+
+cpsDATA <- cpsDATA %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100,
+         mgmtRATIO = (mgmtEMP / TotEMP)*100,
+         ratio90_10 = (Wage90 / Wage10),
+         log90_10 = log(Wage90 / Wage10),
+         sd_wages = sqrt(var_wages),
+         mgmtWAGEratio = mgmtAVG / NONmgmtAVG,
+         log_mWr = log(mgmtAVG / NONmgmtAVG))
+
+
+```
+
+# Add Wage Quartiles by Year
+
+Also add < flags.
+
+```{r eval = TRUE}
+
+cpsORG <- cpsORG %>% group_by(YEAR) %>% summarise(Median = wtd.quantile(hrWAGE2, EARNWT, probs = .5, na.rm = TRUE), 
+                                                  Bottom25 = wtd.quantile(hrWAGE2, EARNWT, probs = .25, na.rm = TRUE)) %>% 
+  right_join(cpsORG, by = "YEAR") %>% 
+  mutate(lessMED = ifelse(hrWAGE2 < Median, 1, 0),
+         less25 = ifelse(hrWAGE2 < Bottom25, 1, 0))
+
+```
+
+
+# Low Wage Industry Analysis
+
+## Less than Year Median
+
+Which industries do those making below the median hourly wage (for that year) work in?
+
+```{r eval = F}
+
+low_wage_ind <- cpsORG %>% group_by(YEAR, IND1990) %>% 
+  summarise(low_wage_emp = (sum(EARNWT * less25, na.rm = TRUE)/12),
+            TotEMP = (sum(EARNWT, na.rm = TRUE)/12))
+
+```
+## Export Summary
+
+```{r eval=F}
+
+openxlsx::write.xlsx(low_wage_ind , here("output/low_wage_ind.xlsx"))
+
+```
+
+# Low Wage Occupations (within Industries)
+
+Curious what the low wage jobs are in these industries. I am especially curious what is going on with schools - why so many low wage jobs?
+
+```{r eval = F}
+
+low_wage_ind_occ <- cpsORG %>% group_by(YEAR, IND1990, OCC2010) %>% 
+  summarise(low_wage_emp = (sum(EARNWT * less25, na.rm = TRUE)/12),
+            TotEMP = (sum(EARNWT, na.rm = TRUE)/12))
+
+```
+
+## Export Summary
+
+```{r eval=F}
+
+openxlsx::write.xlsx(low_wage_ind_occ, here("output/low_wage_ind_occ.xlsx"))
+
+```
+

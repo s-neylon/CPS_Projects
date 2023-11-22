@@ -12,3 +12,5 @@ use "data\cpsDATA_STATA.dta"
 ***************************
 
 xtset ind1990 year, yearly
+
+xtreg

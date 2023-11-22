@@ -20,8 +20,32 @@ library(pacman)
 library(ggplot2)
 library(plm)
 
-
 ```
+
+# Chunk Setup
+
+knitr allows you to turn chunks on and off collectively - you can make eval=[variable] and then set the variable.
+
+This doesn't work for interactive R Studio.
+
+Instead I will use find and replace to mass change them. Currently, they have "eval=TRUE, [group name]", and I can mass change by searching eval=TRUE, [group name] and changing TRUE to false.
+
+Groups:
+
+* Setup Chunks (for any analysis)
+eval=TRUE, evalSetup
+
+* Chunks I used for first draft of Qualifying Paper
+eval=FALSE, evalQP1
+
+* Chunks for QP 1, but after the Interplot fix - i.e. the marginal analysis I did
+eval=FALSE, evalInterplot
+
+* Chunks for Non-mgmt average wage
+eval=TRUE, evalAvgNM
+
+* Interplot 2 - average NM wages marginal analysis
+eval=FALSE, evalInterplot
 
 # Weighted Quantile Function
 
@@ -167,7 +191,7 @@ Information on this is below.
 
 ## RSQLite Code
 
-```{r eval=TRUE}
+```{r eval=TRUE, evalSetup}
 
 # This code establishes a connection with my database
 # See: https://data.library.virginia.edu/creating-a-sqlite-database-for-use-with-r/
@@ -180,7 +204,7 @@ cpsALL <- tbl(con, "cpsALL")
 
 ```
 
-# Disconnect SQLite
+### Disconnect SQLite
 
 Run this code to disconnect from the database
 
@@ -190,14 +214,29 @@ dbDisconnect(con)
 
 ```
 
+### CPI99
 
-### Data Set up
+When downloading from IPUMS, I forgot to download the CPI99 variable, which enables easy conversion into 1999 dollars. Instead, I have gotten the values of CPI99 for each year, and put them in a separate csv, which I will join with the total data set.
+
+CPI99 values: https://cps.ipums.org/cps/cpi99.shtml
+
+I will create inflation adjusted variables in sections below.
+
+```{r eval=TRUE, evalSetup}
+
+CPIdata <- read_csv(here("data/CPI99.csv"))
+
+```
+
+
+## Data Set up
 
 Seems like Kristal 2017 uses 90/10 ratio as measure of inequality
 
 WARNING: EPI argue that you need to bin before using quantiles, since wages clump at certain values: https://www.epi.org/data/methodology/ (see "Wage Percentiles" section)
 
-```{r eval=TRUE}
+
+```{r eval=TRUE, evalSetup}
 
 # Create ORG Microdata
 
@@ -233,6 +272,11 @@ cpsORG <- cpsALL %>%
 
 # NOTE: Looks like it's all good - most people either work 52 weeks a year, or are 0 (not in universe)
   
+# Add CPI99 inflation information
+
+cpsORG <- cpsORG %>% inner_join(CPIdata, by = "YEAR") %>% 
+  mutate(INFLhrWAGE2 = hrWAGE2*CPI99,
+         inflNMwage = ifelse(manager == 0, INFLhrWAGE2, NA_integer_))
 
 # Create Industry Panel
 
@@ -250,13 +294,36 @@ cpsDATA <- summarise(cpsDATA,
                      ln_mgmtAVG = weighted.mean(ln_mgmtWAGE, EARNWT, na.rm = TRUE),
                      var_wages = wtd.var(ln_hrWAGE2, EARNWT, na.rm = TRUE),
                      Wage90 = wtd.quantile(hrWAGE2, EARNWT, probs = .9, na.rm = TRUE),
-                     Wage10 = wtd.quantile(hrWAGE2, EARNWT, probs = .1, na.rm = TRUE))
+                     Wage10 = wtd.quantile(hrWAGE2, EARNWT, probs = .1, na.rm = TRUE),
+                     inflNMavg = weighted.mean(NONmgmtWAGE, EARNWT, na.rm = TRUE))
 
 cpsDATA <- ungroup(cpsDATA)
 
 # Drop big ole data set
 
 rm(cpsORG)
+
+
+# Create New Variables
+
+cpsDATA <- cpsDATA %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100,
+         mgmtRATIO = (mgmtEMP / TotEMP)*100,
+         ratio90_10 = (Wage90 / Wage10),
+         log90_10 = log(Wage90 / Wage10),
+         sd_wages = sqrt(var_wages),
+         mgmtWAGEratio = mgmtAVG / NONmgmtAVG,
+         log_mWr = log(mgmtAVG / NONmgmtAVG))
+
+
+
+```
+
+##### Weighting
+
+I wrote this to try and run weighted regressions, but it is actually quite difficult with panel data.
+
+```{r eval=FALSE}
 
 # Create Weights from average employment - take square root, then inner join
 
@@ -267,23 +334,13 @@ cpsWEIGHT <- cpsDATA %>%
 cpsWEIGHT <- cpsWEIGHT %>% 
   mutate(empWEIGHT = sqrt(avgEMP))
 
-# Create New Variables
-
-
-
-cpsDATA <- cpsDATA %>% 
-  mutate(pctUNION = (unionEMP / TotEMP)*100,
-         mgmtRATIO = (mgmtEMP / TotEMP)*100,
-         ratio90_10 = (Wage90 / Wage10),
-         log90_10 = log(Wage90 / Wage10),
-         sd_wages = sqrt(var_wages))
-
 # Join weights
 
 cpsDATA <- cpsDATA %>% 
   inner_join(cpsWEIGHT, by = "IND1990")
 
 ```
+
 
 #### Filter Industries
 
@@ -301,7 +358,7 @@ Outlier Industries
 - 782 - very small (emp ~5k) with high unionization - get rid of
 
 
-```{r eval=TRUE}
+```{r eval=TRUE, evalSetup}
 
 cpsDATA <- cpsDATA %>% 
   filter(IND1990 != 873 & IND1990 != 782 & IND1990 != 412 & IND1990 > 32 & IND1990 < 900) %>% 
@@ -323,7 +380,7 @@ write_csv(cpsDATA, "cpsDATA.csv")
 
 Put data in industry-year panel format for plm()
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 P_series <- pdata.frame(cpsDATA, index = c("IND1990","YEAR"), drop.index=T, row.names = T)
 
@@ -356,7 +413,7 @@ Strategy of Analysis:
 - Effect of union ratio on inequality
 - Effect of both union and management
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 ln9010.mgmt <- plm(log90_10 ~ mgmtRATIO, data = P_series, model = "within")
 
@@ -367,21 +424,21 @@ ln9010.mgmt_union <- plm(log90_10 ~ mgmtRATIO + pctUNION, data = P_series, model
 ```
 
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 summary(ln9010.mgmt)
 
 ```
 
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 summary(ln9010.union)
 
 ```
 
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 summary(ln9010.mgmt_union)
 
@@ -390,7 +447,7 @@ summary(ln9010.mgmt_union)
 ### variance
 
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 var.mgmt <- plm(var_wages ~ mgmtRATIO, data = P_series, model = "within")
 
@@ -401,21 +458,21 @@ var.mgmt_union <- plm(var_wages ~ mgmtRATIO + pctUNION, data = P_series, model =
 ```
 
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 summary(var.mgmt)
 
 ```
 
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 summary(var.union)
 
 ```
 
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 summary(var.mgmt_union)
 
@@ -424,7 +481,7 @@ summary(var.mgmt_union)
 ### SD
 
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 sd.mgmt <- plm(sd_wages ~ mgmtRATIO, data = P_series, model = "within")
 
@@ -435,21 +492,21 @@ sd.mgmt_union <- plm(sd_wages ~ mgmtRATIO + pctUNION, data = P_series, model = "
 ```
 
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 summary(sd.mgmt)
 
 ```
 
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 summary(sd.union)
 
 ```
 
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalQP1}
 
 summary(sd.mgmt_union)
 
@@ -459,7 +516,7 @@ summary(sd.mgmt_union)
 
 Run interaction, and then plot margins per the ICPSR lab 5 - "2021.1 Spring/ICPSR MLM Workshop"
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalInterplot}
 
 ln9010.mgmtXunion <- plm(log90_10 ~ mgmtRATIO * pctUNION, data = P_series, model = "within")
 
@@ -473,7 +530,7 @@ sd.mgmtXunion <- plm(sd_wages ~ mgmtRATIO * pctUNION, data = P_series, model = "
 
 interplot doesn't play nice with plm, but this dude apparently fixed it: https://github.com/sammo3182/interplot/issues/26#issuecomment-457272328
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalInterplot}
 
 #rm(list = ls())
 
@@ -949,7 +1006,7 @@ interplot.plm <- function(m, var1, var2, plot = TRUE, steps = NULL,
 
 From Lab 5: "2021.1 Spring/ICPSR MLM Workshop"
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalInterplot}
 
 ln9010.margins <- interplot(m = ln9010.mgmtXunion, var1 = "mgmtRATIO", var2 = "pctUNION", ercolor= "gray")+
 geom_line()+
@@ -969,7 +1026,7 @@ ln9010.margins
 
 From Lab 5: "2021.1 Spring/ICPSR MLM Workshop"
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalInterplot}
 
 var.margins <- interplot(m = var.mgmtXunion, var1 = "mgmtRATIO", var2 = "pctUNION", ercolor= "gray")+
 geom_line()+
@@ -989,7 +1046,7 @@ var.margins
 
 From Lab 5: "2021.1 Spring/ICPSR MLM Workshop"
 
-```{r eval=TRUE}
+```{r eval=FALSE, evalInterplot}
 
 var.margins <- interplot(m = sd.mgmtXunion, var1 = "mgmtRATIO", var2 = "pctUNION", ercolor= "gray")+
 geom_line()+
@@ -1009,7 +1066,7 @@ var.margins
 
 With unions this time
 
-```{r eval=FALSE}
+```{r eval=FALSE, evalInterplot}
 
 ln9010.margins.rev <- interplot(m = ln9010.mgmtXunion, var1 = "pctUNION", var2 = "mgmtRATIO", ercolor= "gray")+
 geom_line()+
@@ -1029,7 +1086,7 @@ ln9010.margins.rev
 
 with unions this time
 
-```{r eval=FALSE}
+```{r eval=FALSE, evalInterplot}
 
 var.margins.rev <- interplot(m = var.mgmtXunion, var1 = "pctUNION", var2 = "mgmtRATIO", ercolor= "gray")+
 geom_line()+
@@ -1243,4 +1300,1074 @@ cpsUNIONstats <- cpsUNION %>% summarise(
 
 ```
 
+# Non-Mgmt Average Wages
 
+### (10-06-2021)
+
+This is similar to the analyses I ran on the CES data. Paul thinks this may be a better measure of what I am trying to get at than the industry inequality measures. I am trying to see if an increase in managerial intensity suppresses non-mgmt wages.
+
+## P Series
+
+```{r eval=TRUE, evalAvgNM}
+
+P_series <- pdata.frame(cpsDATA, index = c("IND1990","YEAR"), drop.index=T, row.names = T)
+
+```
+
+## Models
+
+#### Non-adjusted
+
+Not adjusted for inflation.
+
+Looking at the effect of managerial ratio, and unionization, on average wages.
+
+```{r eval=TRUE, evalAvgNM}
+
+AvgNM.mgmt <- plm(NONmgmtAVG ~ mgmtRATIO, data = P_series, model = "within")
+
+AvgNM.union <- plm(NONmgmtAVG ~ pctUNION, data = P_series, model = "within")
+
+AvgNM.mgmt_union <- plm(NONmgmtAVG ~ mgmtRATIO + pctUNION, data = P_series, model = "within")
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(AvgNM.mgmt)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(AvgNM.union)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(AvgNM.mgmt_union)
+
+```
+
+#### Adjusted
+
+Adjusted for inflation.
+
+Looking at the effect of managerial ratio, and unionization, on average wages.
+
+```{r eval=TRUE, evalAvgNM}
+
+inflAvgNM.mgmt <- plm(inflNMavg ~ mgmtRATIO, data = P_series, model = "within")
+
+inflAvgNM.union <- plm(inflNMavg ~ pctUNION, data = P_series, model = "within")
+
+inflAvgNM.mgmt_union <- plm(inflNMavg ~ mgmtRATIO + pctUNION, data = P_series, model = "within")
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(inflAvgNM.mgmt)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(inflAvgNM.union)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(inflAvgNM.mgmt_union)
+
+```
+
+# Manager Wage Ratio
+
+Ratio of average manager wage to average non-manager wage
+
+Not adjusted for inflation.
+
+Looking at the effect of managerial ratio, and unionization, on Manager Wage Ratio.
+
+## Not logged
+
+```{r eval=TRUE, evalAvgNM}
+
+mWr.mgmt <- plm(mgmtWAGEratio ~ mgmtRATIO, data = P_series, model = "within")
+
+mWr.union <- plm(mgmtWAGEratio ~ pctUNION, data = P_series, model = "within")
+
+mWr.mgmt_union <- plm(mgmtWAGEratio ~ mgmtRATIO + pctUNION, data = P_series, model = "within")
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(mWr.mgmt)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(mWr.union)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(mWr.mgmt_union)
+
+```
+## Logged
+
+```{r eval=TRUE, evalAvgNM}
+
+log_mWr.mgmt <- plm(log_mWr ~ mgmtRATIO, data = P_series, model = "within")
+
+log_mWr.union <- plm(log_mWr ~ pctUNION, data = P_series, model = "within")
+
+log_mWr.mgmt_union <- plm(log_mWr ~ mgmtRATIO + pctUNION, data = P_series, model = "within")
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(log_mWr.mgmt)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(log_mWr.union)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(log_mWr.mgmt_union)
+
+```
+
+# Marginal Analysis 2
+
+Run interaction, and then plot margins per the ICPSR lab 5 - "2021.1 Spring/ICPSR MLM Workshop"
+
+```{r eval=FALSE, evalInterplot2}
+
+inflAvgNM.mgmtXunion <- plm(inflNMavg ~ mgmtRATIO * pctUNION, data = P_series, model = "within")
+
+```
+
+### FIX interplot
+
+interplot doesn't play nice with plm, but this dude apparently fixed it: https://github.com/sammo3182/interplot/issues/26#issuecomment-457272328
+
+```{r eval=FALSE, evalInterplot2}
+
+#rm(list = ls())
+
+library(ggeffects)
+library(plm)
+library(interplot)
+
+
+
+
+
+
+#############################
+### Define interplot.plot ###
+#############################
+
+
+## S3 method for class 'data.frame'
+interplot.plot <- function(m, var1 = NULL, var2 = NULL, plot = TRUE, steps = NULL, ci = .95, hist = FALSE, var2_dt = NULL, point = FALSE, sims = 5000, xmin = NA, xmax = NA, ercolor = NA, esize = 0.5, ralpha = 0.5, rfill = "grey70", ...) {
+  if(is.null(steps)) steps <- nrow(m)
+  levels <- sort(unique(m$fake))
+  ymin <- ymax <- vector() # to deal with the "no visible binding for global variable" issue
+  xdiff <- vector() # to deal with the "no visible binding for global variable" issue
+  
+  
+  if (hist == FALSE) {
+    if (steps < 10 | point == T) {
+      if (is.na(ercolor)) 
+      {
+        ercolor <- "black"
+      }  # ensure whisker can be drawn
+      coef.plot <- ggplot(m, aes_string(x = "fake", y = "coef1")) + geom_point(...) + geom_errorbar(aes_string(ymin = "lb", 
+                                                                                                               ymax = "ub"), width = 0, color = ercolor, size = esize) + scale_x_continuous(breaks = levels) + 
+        ylab(NULL) + xlab(NULL)
+    } else {
+      coef.plot <- ggplot(m, aes_string(x = "fake", y = "coef1")) + geom_line(...) + geom_ribbon(aes_string(ymin = "lb", 
+                                                                                                            ymax = "ub"), alpha = ralpha, color = ercolor, fill = rfill) + ylab(NULL) + xlab(NULL)
+    }
+    return(coef.plot)
+  } else {
+    if (point == T) {
+      if (is.na(ercolor)) 
+      {
+        ercolor <- "black"
+      }  # ensure whisker can be drawn
+      
+      yrange <- c(m$ub, m$lb, var2_dt)
+      maxdiff <- (max(yrange) - min(yrange))
+      
+      break_var2 <- steps + 1
+      if (break_var2 >= 100) 
+        break_var2 <- 100
+      hist.out <- hist(var2_dt, breaks = seq(min(var2_dt), max(var2_dt), l = break_var2), plot = FALSE)
+      
+      n.hist <- length(hist.out$mids)
+      
+      if (steps <10) {dist <- (hist.out$mids[2] - hist.out$mids[1])/3
+      } else {dist <- hist.out$mids[2] - hist.out$mids[1]}
+      hist.max <- max(hist.out$counts)
+      
+      if (steps <10) {
+        histX <- data.frame(ymin = rep(min(yrange) - maxdiff/5, n.hist),
+                            ymax = hist.out$counts/hist.max * maxdiff/5 + min(yrange) - maxdiff/5, 
+                            xmin = sort(unique(var2_dt)) - dist/2, 
+                            xmax = sort(unique(var2_dt)) + dist/2)
+      } else {
+        histX <- data.frame(ymin = rep(min(yrange) - maxdiff/5, n.hist), 
+                            ymax = hist.out$counts/hist.max * maxdiff/5 + min(yrange) - maxdiff/5, 
+                            xmin = hist.out$mids - dist/2, 
+                            xmax = hist.out$mids + dist/2)
+      } 
+      #when up to 10, the sort(unique(var2_dt)) - dist/2 leads to problemtic histogram
+      
+      
+      if (steps <10) {
+        histX_sub <- histX
+      } else {
+        histX_sub <- mutate(histX, xdiff = xmax - xmin, xmax = xmax - xdiff/2)
+      }
+      
+      coef.plot <- ggplot()
+      coef.plot <- coef.plot + geom_rect(data = histX, aes(xmin = xmin, xmax = xmax, ymin = ymin, 
+                                                           ymax = ymax), colour = "gray50", alpha = 0, size = 0.5)  #histgram
+      
+      coef.plot <- coef.plot +
+        geom_errorbar(data = m, aes_string(x = "fake", ymin = "lb", ymax = "ub"), width = 0, 
+                      color = ercolor, size = esize) + scale_x_continuous(breaks = levels) + ylab(NULL) + 
+        xlab(NULL) + geom_point(data = m, aes_string(x = "fake", y = "coef1")) 
+      
+    } else {
+      
+      yrange <- c(m$ub, m$lb)
+      
+      maxdiff <- (max(yrange) - min(yrange))
+      
+      break_var2 <- length(unique(var2_dt))
+      if (break_var2 >= 100) 
+        break_var2 <- 100
+      hist.out <- hist(var2_dt, breaks = break_var2, plot = FALSE)
+      
+      n.hist <- length(hist.out$mids)
+      dist <- hist.out$mids[2] - hist.out$mids[1]
+      hist.max <- max(hist.out$counts)
+      
+      histX <- data.frame(ymin = rep(min(yrange) - maxdiff/5, n.hist), ymax = hist.out$counts/hist.max * 
+                            maxdiff/5 + min(yrange) - maxdiff/5, xmin = hist.out$mids - dist/2, xmax = hist.out$mids + 
+                            dist/2)
+      
+      
+      
+      # interplot.plot(m = coef, var1 = 'cyl', var2 = 'wt')
+      
+      coef.plot <- ggplot()
+      coef.plot <- coef.plot + geom_rect(data = histX, aes(xmin = xmin, xmax = xmax, ymin = ymin, 
+                                                           ymax = ymax), colour = "gray50", alpha = 0, size = 0.5)
+      
+      
+      coef.plot <- coef.plot + geom_line(data = m, aes_string(x = "fake", y = "coef1")) + 
+        geom_ribbon(data = m, aes_string(x = "fake", ymin = "lb", ymax = "ub"), alpha = ralpha, 
+                    color = ercolor, fill = rfill) + ylab(NULL) + xlab(NULL)
+    }
+    return(coef.plot)
+  }
+  
+} 
+
+
+
+#################################
+#### Set sims method for plm ####
+#################################
+
+sim.plm<-function(object, n.sims=100)
+{
+  object.class <- class(object)[[1]]
+  summ <- summary (object)
+  coef <- summ$coef[,1:2,drop=FALSE]
+  dimnames(coef)[[2]] <- c("coef.est","coef.sd")
+  # sigma.hat <- summ$sigma 
+  # TR: define sigma by hand
+  NN <- nrow(object$model)
+  PP <- nrow(coef)
+  sigma.hat <- sqrt(deviance(object) / (NN-PP))
+  # TR: end              
+  beta.hat <- coef[,1,drop = FALSE]
+  # V.beta <- summ$vcov # TR: Use scaled vcov
+  # V.beta <- summ$cov.unscaled
+  V.beta <- vcov(summ)/sigma.hat^2 # TR: unscale scaled vcov
+  # n <- summ$df[1] + summ$df[2]
+  # k <- summ$df[1]
+  n <- nrow(summ$model) # TR: define n
+  k <- nrow(summ$coefficients) # TR: define k
+  sigma <- rep (NA, n.sims)
+  beta <- array (NA, c(n.sims,k))
+  dimnames(beta) <- list (NULL, rownames(beta.hat))
+  for (s in 1:n.sims){
+    sigma[s] <- sigma.hat*sqrt((n-k)/rchisq(1,n-k))
+    # beta[s,] <- MASS::mvrnorm (1, beta.hat, V.beta) # TR: if above: vcov (scaled) than without "*sigma[s]^2"
+    beta[s,] <- MASS::mvrnorm(1, beta.hat, V.beta * sigma[s]^2)
+  }
+  
+  ans <- new("sim",
+             coef = beta,
+             sigma = sigma)
+  return (ans)
+}
+setMethod("sim", signature = "plm",
+          definition = sim.plm)
+
+
+
+
+# ### Old way ###
+# 
+# sim.plm<-function(object, n.sims=100)
+# {
+#   object.class <- class(object)[[1]]
+#   summ <- summary (object)
+#   coef <- summ$coef[,1:2,drop=FALSE]
+#   dimnames(coef)[[2]] <- c("coef.est","coef.sd")
+#   # sigma.hat <- summ$sigma 
+#   # TR: define sigma by hand
+#   NN <- nrow(object$model)
+#   PP <- length(coef)
+#   sigma.hat <- sqrt(deviance(object) / (NN-PP))
+#   # TR: end              
+#   beta.hat <- coef[,1,drop = FALSE]
+#   V.beta <- summ$vcov
+#   # V.beta <- summ$cov.unscaled
+#   n <- nrow(summ$model)
+#   k <- nrow(summ$coefficients)
+#   # n <- summ$df[1] + summ$df[2]
+#   # k <- summ$df[1]
+#   sigma <- rep (NA, n.sims)
+#   beta <- array (NA, c(n.sims,k))
+#   dimnames(beta) <- list (NULL, rownames(beta.hat))
+#   for (s in 1:n.sims){
+#     sigma[s] <- sigma.hat*sqrt((n-k)/rchisq(1,n-k))
+#     beta[s,] <- MASS::mvrnorm (1, beta.hat, V.beta) # oben vcov (scaled) hier "*sigma[s]^2" raus
+#     # beta[s,] <- MASS::mvrnorm(1, beta.hat, V.beta * sigma[s]^2)
+#   }
+#   
+#   ans <- new("sim",
+#              coef = beta,
+#              sigma = sigma)
+#   return (ans)
+# }
+# setMethod("sim", signature = "plm",
+#           definition = sim.plm)
+
+
+
+
+
+
+#####################
+### Interplot plm ###
+#####################
+
+interplot.plm <- function(m, var1, var2, plot = TRUE, steps = NULL, 
+                              ci = .95, hist = FALSE, var2_dt = NA, point = FALSE, sims = 5000, xmin = NA, 
+                              xmax = NA, ercolor = NA, esize = 0.5, ralpha = 0.5, rfill = "grey70", 
+                              ...) {
+  set.seed(324)
+  
+  m.class <- class(m)
+  m.sims <- arm::sim(m, sims)
+  
+  
+  ### For factor base terms###
+  factor_v1 <- factor_v2 <- FALSE
+  
+  if (is.factor(eval(parse(text = paste0("m$model$", var1)))) & is.factor(eval(parse(text = paste0("m$model$", 
+                                                                                                   var2))))) 
+    stop("The function does not support interactions between two factors.")
+  
+  
+  if (is.factor(eval(parse(text = paste0("m$model$", var1))))) {
+    var1_bk <- var1
+    var1 <- paste0(var1, eval(parse(text = paste0("m$xlevel$", var1))))
+    factor_v1 <- TRUE
+    ifelse(var1 == var2, var12 <- paste0("I(", var1, "^2)"), var12 <- paste0(var2, 
+                                                                             ":", var1)[-1])
+    
+    # the first category is censored to avoid multicolinarity
+    for (i in seq(var12)) {
+      if (!var12[i] %in% names(m$coef)) 
+        var12[i] <- paste0(var1, ":", var2)[-1][i]
+      if (!var12[i] %in% names(m$coef)) 
+        stop(paste("Model does not include the interaction of", 
+                   var1, "and", var2, "."))
+    }
+    
+  } else if (is.factor(eval(parse(text = paste0("m$model$", var2))))) {
+    var2_bk <- var2
+    var2 <- paste0(var2, eval(parse(text = paste0("m$xlevel$", var2))))
+    factor_v2 <- TRUE
+    ifelse(var1 == var2, var12 <- paste0("I(", var1, "^2)"), var12 <- paste0(var2, 
+                                                                             ":", var1)[-1])
+    
+    # the first category is censored to avoid multicolinarity
+    for (i in seq(var12)) {
+      if (!var12[i] %in% names(m$coef)) 
+        var12[i] <- paste0(var1, ":", var2)[-1][i]
+      if (!var12[i] %in% names(m$coef)) 
+        stop(paste("Model does not include the interaction of", 
+                   var1, "and", var2, "."))
+    }
+    
+  } else {
+    ifelse(var1 == var2, var12 <- paste0("I(", var1, "^2)"), var12 <- paste0(var2, 
+                                                                             ":", var1))
+    
+    # the first category is censored to avoid multicolinarity
+    for (i in seq(var12)) {
+      if (!var12[i] %in% names(m$coef)) 
+        var12[i] <- paste0(var1, ":", var2)[i]
+      if (!var12[i] %in% names(m$coef)) 
+        stop(paste("Model does not include the interaction of", 
+                   var1, "and", var2, "."))
+    }
+  }
+  
+  ################### 
+  
+  
+  if (factor_v2) {
+    xmin <- 0
+    xmax <- 1
+    steps <- 2
+  } else {
+    if (is.na(xmin)) 
+      #xmin <- min(m$model[var2], na.rm = T) 
+      xmin <- min(m$model[, which(names(m$model)==var2)], na.rm = T) # TR
+    if (is.na(xmax)) 
+      #xmax <- max(m$model[var2], na.rm = T)
+      xmax <- max(m$model[, which(names(m$model)==var2)], na.rm = T) # TR
+    
+    if (is.null(steps)) {
+      steps <- eval(parse(text = paste0("length(unique(na.omit(m$model$", 
+                                        var2, ")))")))
+    }
+    
+    
+    if (steps > 100) 
+      steps <- 100  # avoid redundant calculation
+  }
+  
+  coef <- data.frame(fake = seq(xmin, xmax, length.out = steps), coef1 = NA, 
+                     ub = NA, lb = NA)
+  coef_df <- data.frame(fake = numeric(0), coef1 = numeric(0), ub = numeric(0), 
+                        lb = numeric(0), model = character(0))
+  
+  if (factor_v1) {
+    for (j in 1:(length(eval(parse(text = paste0("m$xlevel$", var1_bk)))) - 
+                 1)) {
+      # only n - 1 interactions; one category is avoided against
+      # multicolinarity
+      
+      for (i in 1:steps) {
+        coef$coef1[i] <- mean(m.sims@coef[, match(var1[j + 1], 
+                                                  names(m$coef))] + coef$fake[i] * m.sims@coef[, match(var12[j], 
+                                                                                                       names(m$coef))])
+        coef$ub[i] <- quantile(m.sims@coef[, match(var1[j + 1], 
+                                                   names(m$coef))] + coef$fake[i] * m.sims@coef[, match(var12[j], 
+                                                                                                        names(m$coef))], 1 - (1 - ci) / 2)
+        coef$lb[i] <- quantile(m.sims@coef[, match(var1[j + 1], 
+                                                   names(m$coef))] + coef$fake[i] * m.sims@coef[, match(var12[j], 
+                                                                                                        names(m$coef))], (1 - ci) / 2)
+      }
+      
+      if (plot == TRUE) {
+        coef$value <- var1[j + 1]
+        coef_df <- rbind(coef_df, coef)
+        if (hist == TRUE) {
+          if (is.na(var2_dt)) {
+            var2_dt <- eval(parse(text = paste0("m$model$", var2)))
+          } else {
+            var2_dt <- var2_dt
+          }
+        }
+      } else {
+        names(coef) <- c(var2, "coef", "ub", "lb")
+        return(coef)
+      }
+    }
+    coef_df$value <- as.factor(coef_df$value)
+    interplot.plot(m = coef_df, hist = hist, var2_dt = var2_dt, steps = steps, 
+                   point = point, ercolor = ercolor, esize = esize, ralpha = ralpha, 
+                   rfill = rfill, ...) + facet_grid(. ~ value)
+    
+  } else if (factor_v2) {
+    for (j in 1:(length(eval(parse(text = paste0("m$xlevel$", var2_bk)))) - 
+                 1)) {
+      # only n - 1 interactions; one category is avoided against
+      # multicolinarity
+      
+      for (i in 1:steps) {
+        coef$coef1[i] <- mean(m.sims@coef[, match(var1, names(m$coef))] + 
+                                coef$fake[i] * m.sims@coef[, match(var12[j], names(m$coef))])
+        coef$ub[i] <- quantile(m.sims@coef[, match(var1, names(m$coef))] + 
+                                 coef$fake[i] * m.sims@coef[, match(var12[j], names(m$coef))], 
+                               1 - (1 - ci) / 2)
+        coef$lb[i] <- quantile(m.sims@coef[, match(var1, names(m$coef))] + 
+                                 coef$fake[i] * m.sims@coef[, match(var12[j], names(m$coef))], 
+                               (1 - ci) / 2)
+      }
+      
+      if (plot == TRUE) {
+        coef$value <- var2[j + 1]
+        coef_df <- rbind(coef_df, coef)
+        if (hist == TRUE) {
+          if (is.na(var2_dt)) {
+            var2_dt <- eval(parse(text = paste0("m$model$", var2)))
+          } else {
+            var2_dt <- var2_dt
+          }
+        }
+      } else {
+        names(coef) <- c(var2, "coef", "ub", "lb")
+        return(coef)
+      }
+    }
+    coef_df$value <- as.factor(coef_df$value)
+    interplot.plot(m = coef_df, hist = hist, steps = steps, var2_dt = var2_dt, 
+                   point = point, ercolor = ercolor, esize = esize, ralpha = ralpha, 
+                   rfill = rfill, ...) + facet_grid(. ~ value)
+    
+    
+  } else {
+    ## Correct marginal effect for quadratic terms
+    multiplier <- if (var1 == var2) 
+      2 else 1
+    
+    for (i in 1:steps) {
+      coef$coef1[i] <- mean(m.sims@coef[, match(var1, names(m$coef))] + 
+                              multiplier * coef$fake[i] * m.sims@coef[, match(var12, 
+                                                                              names(m$coef))])
+      coef$ub[i] <- quantile(m.sims@coef[, match(var1, names(m$coef))] + 
+                               multiplier * coef$fake[i] * m.sims@coef[, match(var12, 
+                                                                               names(m$coef))], 1 - (1 - ci) / 2)
+      coef$lb[i] <- quantile(m.sims@coef[, match(var1, names(m$coef))] + 
+                               multiplier * coef$fake[i] * m.sims@coef[, match(var12, 
+                                                                               names(m$coef))], (1 - ci) / 2)
+    }
+    
+    if (plot == TRUE) {
+      if (hist == TRUE) {
+        if (is.na(var2_dt)) {
+          var2_dt <- eval(parse(text = paste0("m$model$", var2)))
+        } else {
+          var2_dt <- var2_dt
+        }
+      }
+      interplot.plot(m = coef, steps = steps, hist = hist, var2_dt = var2_dt, 
+                     point = point, ercolor = ercolor, esize = esize, ralpha = ralpha, 
+                     rfill = rfill, ...)
+    } else {
+      names(coef) <- c(var2, "coef", "ub", "lb")
+      return(coef)
+    }
+    
+  }
+  
+}
+
+
+
+
+
+
+# ###############
+# ### Example ###
+# ###############
+# 
+# 
+# data(Cigar)
+# 
+# 
+# 
+# ### models ###
+# 
+# plm.mod<-plm(sales~ price + pop + pimin + price*pimin,
+#              model="within", effect="individual",
+#              index=c("state", "year"), data=Cigar)
+# summary(plm.mod)
+# 
+# 
+# lm.mod<-lm(sales~ price + pop + pimin + price*pimin,
+#            data=Cigar)
+# summary(lm.mod)
+# 
+# 
+# 
+# ### Interplot lm ###
+# 
+# lm.intpl<-interplot(lm.mod, "price", "pimin")
+# 
+# 
+# lm.intpl
+# 
+# 
+# ### Interplot plm ###
+# 
+# plm.intpl<-interplot.plm(plm.mod, "price", "pimin", plot=T)
+# 
+# plm.intpl
+
+```
+
+
+### log 90-10
+
+From Lab 5: "2021.1 Spring/ICPSR MLM Workshop"
+
+```{r eval=FALSE, evalInterplot2}
+
+inflAvgNM.margins <- interplot(m = inflAvgNM.mgmtXunion, var1 = "mgmtRATIO", var2 = "pctUNION", ercolor= "gray")+
+geom_line()+
+theme_minimal()+
+theme(axis.text=element_text(size=16), 
+      axis.title.x = element_text(size=16),
+      axis.title.y = element_text(size=16, color="red",face="bold.italic"))+
+ylab("Marginal Effects of Mgmt Ratio")+
+xlab("Pct Union")+
+geom_hline(yintercept=0, linetype="dotted", lwd=0.5)+
+ggtitle("DV=Avg NM Wage")+
+labs(caption="")
+inflAvgNM.margins
+```
+
+# Two-way fixed effects
+
+Controlling for time as well as individual effects
+
+## Adjusted
+
+Adjusted for inflation.
+
+Looking at the effect of managerial ratio, and unionization, on average wages.
+
+```{r eval=TRUE, evalAvgNM}
+
+inflANM2.mgmt <- plm(inflNMavg ~ mgmtRATIO, data = P_series, effect = "twoways", model = "within")
+
+inflANM2.union <- plm(inflNMavg ~ pctUNION, data = P_series, effect = "twoways", model = "within")
+
+inflANM2.mgmt_union <- plm(inflNMavg ~ mgmtRATIO + pctUNION, data = P_series, effect = "twoways", model = "within")
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(inflANM2.mgmt)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(inflANM2.union)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(inflANM2.mgmt_union)
+
+```
+## Non-adjusted
+
+Not adjusted for inflation.
+
+Looking at the effect of managerial ratio, and unionization, on average wages.
+
+```{r eval=TRUE, evalAvgNM}
+
+AvgNM2.mgmt <- plm(NONmgmtAVG ~ mgmtRATIO, data = P_series, effect = "twoways", model = "within")
+
+AvgNM2.union <- plm(NONmgmtAVG ~ pctUNION, data = P_series, effect = "twoways", model = "within")
+
+AvgNM2.mgmt_union <- plm(NONmgmtAVG ~ mgmtRATIO + pctUNION, data = P_series, effect = "twoways", model = "within")
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(AvgNM2.mgmt)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(AvgNM2.union)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(AvgNM2.mgmt_union)
+
+```
+
+### First Difference
+
+```{r eval=FALSE}
+
+fd_AvgNM.mgmt <- plm(NONmgmtAVG ~ mgmtRATIO, data = P_series, model = "fd")
+summary(fd_AvgNM.mgmt)
+
+```
+### Logged
+
+```{r eval=FALSE}
+
+lnAvgNM2.mgmt <- plm(log(NONmgmtAVG) ~ mgmtRATIO, data = P_series, effect = "twoways", model = "within")
+summary(lnAvgNM2.mgmt)
+
+```
+
+
+# Tests
+
+I have unfortunately neglected the usual set of tests that I should do for panel data.
+
+Using the plm documentation, there are a series of tests which I can run.
+
+plm documentation: https://cran.r-project.org/web/packages/plm/vignettes/A_plmPackage.html
+
+* pooling tests to check poolability, i.e., the hypothesis that the same coefficients apply across all individuals,
+
+* if the homogeneity assumption over the coefficients is established, the next step is to establish the presence of unobserved effects, comparing the null of spherical residuals with the alternative of group (time) specific effects in the error term,
+
+* the choice between fixed and random effects specifications is based on Hausman-type tests, comparing the two estimators under the null of no significant difference: if this is not rejected, the more efficient random effects estimator is chosen,
+
+* even after this step, departures of the error structure from sphericity can further affect inference, so that either screening tests or robust diagnostics are needed.
+
+## Poolability
+
+plm documentation: "pooltest tests the hypothesis that the same coefficients apply to each individual"
+
+```{r eval=FALSE}
+
+pooltest(inflNMavg ~ mgmtRATIO, data = P_series, model = "within")
+
+```
+Result: Reject the null, 
+
+## Individual and Time effects
+
+plmtest implements Lagrange multiplier tests of individual or/and time effects based on the results of the pooling model. Its main argument is a plm object (the result of a pooling model) or a formula.
+
+### Individual
+
+```{r eval=FALSE}
+
+plmtest(inflNMavg ~ mgmtRATIO, data = P_series, effect="individual")
+
+```
+
+Result: Reject the null, there are individual effects
+
+pFtest: F test - alternative way to test.
+
+```{r eval=FALSE}
+
+pFtest(inflNMavg ~ mgmtRATIO, data = P_series, effect="individual")
+
+```
+
+Result: reject the null, there are significant individual effects
+
+### Time
+
+```{r eval=FALSE}
+
+plmtest(inflNMavg ~ mgmtRATIO, data = P_series, effect="time")
+
+```
+Result: reject the null, there are significant time effects
+
+### Two way
+
+```{r eval=FALSE}
+
+plmtest(inflNMavg ~ mgmtRATIO, data = P_series, effect="twoways")
+
+```
+Result: reject the null, there are significant two-way effects
+
+## Hausman
+
+phtest computes the Hausman test which is based on the comparison of two sets of estimates (see Hausman (1978)). Its main arguments are two panelmodel objects or a formula. A classical application of the Hausman test for panel data is to compare the fixed and the random effects models:
+
+```{r eval=FALSE}
+
+fe.mgmt <- plm(inflNMavg ~ mgmtRATIO, data = P_series, model = "within")
+re.mgmt <- plm(inflNMavg ~ mgmtRATIO, data = P_series, model = "random")
+phtest(fe.mgmt, re.mgmt)
+
+```
+
+Result: p-value <.05, use fixed effects
+
+### Two-ways
+
+```{r eval=FALSE}
+
+fe2.mgmt <- plm(inflNMavg ~ mgmtRATIO, data = P_series, effect = "twoways", model = "within")
+re2.mgmt <- plm(inflNMavg ~ mgmtRATIO, data = P_series, effect = "twoways", model = "random")
+phtest(fe2.mgmt, re2.mgmt)
+
+```
+Result: p-value <.05, use fixed effects
+
+## Cross-sectional dependence
+
+From this powerpoint: https://www.princeton.edu/~otorres/Panel101R.pdf
+
+pg20:
+
+According to Baltagi, cross-sectional dependence is a problem in macro panels with long time series.
+This is not much of a problem in micro panels (few years and large number of cases).
+The null hypothesis in the B-P/LM and Pasaran CD tests of independence is that residuals across
+entities are not correlated. B-P/LM and Pasaran CD (cross-sectional dependence) tests are used to test
+whether the residuals are correlated across entities*. Cross-sectional dependence can lead to bias in
+tests results (also called contemporaneous correlation). 
+
+### Breusch-Pagan LM test
+
+```{r eval=FALSE}
+
+pcdtest(fe.mgmt, test = c("lm"))
+pcdtest(fe2.mgmt, test = c("lm"))
+
+```
+
+Result: reject the null, there *IS* cross-sectional dependence!
+
+### Pasaran CD test
+
+```{r eval=FALSE}
+
+pcdtest(fe.mgmt, test = c("cd"))
+pcdtest(fe2.mgmt, test = c("cd"))
+
+```
+Result: reject the null, there *IS* cross-sectional dependence!
+
+## Serial Correlation
+
+pg 21: https://www.princeton.edu/~otorres/Panel101R.pdf
+
+Serial correlation tests apply to macro panels with long time series. Not a problem in micro
+panels (with very few years). The null is that there is not serial correlation.
+
+```{r eval=FALSE}
+
+pbgtest(fe.mgmt)
+pbgtest(fe2.mgmt)
+
+```
+
+Results: Reject the null, there *IS* serial correlation!
+
+ 
+## Stationarity/Unit-roots
+
+pg 22: https://www.princeton.edu/~otorres/Panel101R.pdf
+
+The Dickey-Fuller test to check for stochastic trends. The null hypothesis is that the
+series has a unit root (i.e. non-stationary). If unit root is present you can take the first
+difference of the variable. 
+
+### Test infl avg NM wages
+
+```{r eval=FALSE}
+
+#library(tseries)
+
+adf.test(P_series$inflNMavg)
+
+```
+Result: reject the null, there are *no* unit roots, the variable is stationary
+
+### Test avg NM wages
+
+```{r eval=FALSE}
+
+#library(tseries)
+
+adf.test(P_series$NONmgmtAVG)
+
+```
+Result: reject the null, average NM wages (not infl adjusted) are stationary
+
+### Test Mgmt Ratio
+
+```{r eval=FALSE}
+
+#library(tseries)
+
+adf.test(P_series$mgmtRATIO)
+
+```
+Result: Reject the null, the management ratio variable is stationary
+
+### Test Union pct
+
+```{r eval=FALSE}
+
+#library(tseries)
+
+adf.test(P_series$pctUNION)
+
+```
+Result: Reject the null, pctUNION is stationary
+
+## Heteroskedasticity
+
+pg 23: https://www.princeton.edu/~otorres/Panel101R.pdf
+
+The null hypothesis for the Breusch-Pagan test is homoskedasticity.
+
+```{r eval=FALSE}
+
+#library(lmtest)
+
+bptest(inflNMavg ~ mgmtRATIO + factor(IND1990), data = cpsDATA, studentize=F)
+
+```
+
+Result: Reject the null, there is Heteroskedasticity
+
+# Dealing with Heteroskedasticity
+
+My test for heteroskedasticity (see chunk right above this) revealed that I need to control for it.
+
+pg 26: https://www.princeton.edu/~otorres/Panel101R.pdf
+
+Original coefficients
+```{r eval=FALSE}
+
+coeftest(fe2.mgmt) 
+
+```
+
+Heteroskedasticity consistent coefficients
+```{r eval=FALSE}
+
+coeftest(fe2.mgmt, vcovHC) 
+
+```
+
+Heteroskedasticity consistent coefficients (Arellano)
+```{r eval=FALSE}
+
+coeftest(fe2.mgmt, vcovHC(fe2.mgmt, method = "arellano")) 
+
+```
+
+Heteroskedasticity consistent coefficients, type 3
+```{r eval=FALSE}
+
+coeftest(fe2.mgmt, vcovHC(fe2.mgmt, type = "HC3")) 
+
+```
+ 
+# Test Results Summary
+ 
+ * Poolability: ?
+ 
+ * Individual and Time
+  * Individual: there are significant individual effects
+  * Time: there are significant time effects
+  * Two-way: there are significant two-way effects
+* Hausman: 
+  * One-way: p-value <.05, use fixed effects
+  * Two-way: p-value <.05, use fixed effects
+* Cross-sectional dependence
+X  * Breusch-Pagan LM test: reject the null, there *IS* cross-sectional dependence!
+X  * Pasaran CD test: reject the null, there *IS* cross-sectional dependence!
+X * Serial correlation: Reject the null, there *IS* serial correlation!
+* Stationarity/Unit-roots
+  * inflNMavg: no unit-root, stationary
+  * NONmgmtAVG: no unit-root, stationary
+  * mgmtRATIO: no unit-root, stationary
+  * pctUNION: no unit-root, stationary
+* Heteroskedasticity: Reject the null, there is Heteroskedasticity
+  * After controlling for Heteroskedasticity, the results didn't change that much
+  * See "Dealing with Heteroskedasticity" section above
+  
+To Do:
+* Cross-sectional dependence
+* Serial correlation
+
+# Logged NM average
+
+```{r eval=TRUE, evalAvgNM}
+
+logANM.mgmt <- plm(ln_NONmgmtAVG ~ mgmtRATIO, data = P_series, model = "within")
+
+logANM.union <- plm(ln_NONmgmtAVG ~ pctUNION, data = P_series, model = "within")
+
+logANM.mgmt_union <- plm(ln_NONmgmtAVG ~ mgmtRATIO + pctUNION, data = P_series, model = "within")
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(AvgNM.mgmt)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(AvgNM.union)
+
+```
+
+
+```{r eval=TRUE, evalAvgNM}
+
+summary(AvgNM.mgmt_union)
+
+```

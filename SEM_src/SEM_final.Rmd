@@ -1,0 +1,1357 @@
+---
+title: "SEM Final Project"
+author: "Sam Neylon"
+date: "5/15/2022"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#### Using "here" to keep project directory as working directory
+#### NOTE: Rmarkdown will try to make the file it is inside the working directory, but "here" should fix it.
+
+library(here)
+library(tidyverse)
+library(data.table)
+library(DBI)
+library(Hmisc)
+library(pacman)
+library(ggplot2)
+library(lavaan)
+library(semPlot)
+
+```
+
+# Weighted Quantile Function
+
+Apparently the Hmisc package is broken, when it comes to weighted quantiles - so this angry guy fixed it: https://github.com/harrelfe/Hmisc/issues/97#issuecomment-661793822
+
+Here is his code:
+
+```{r eval=TRUE}
+
+wtd.quantile<- function (x, weights = NULL, probs = c(0, 0.25, 0.5, 0.75, 1),
+                         type = c("quantile", "(i-1)/(n-1)", "i/(n+1)", "i/n"),
+                         na.rm = TRUE)  {
+  # Function taken from HMISC, but issue solved which is documented here: https://github.com/harrelfe/Hmisc/issues/97#issuecomment-429634634
+  normwt = FALSE
+  if (!length(weights))      return(quantile(x, probs = probs, na.rm = na.rm))
+  type <- match.arg(type)
+  if (any(probs < 0 | probs > 1))      stop("Probabilities must be between 0 and 1 inclusive")
+  nams <- paste(format(round(probs * 100, if (length(probs) >
+                                              1) 2 - log10(diff(range(probs))) else 2)), "%", sep = "")
+
+  if(na.rm & any(is.na(weights))){   ###### new
+    i<- is.na(weights)
+    x <- x[!i]
+    weights <- weights[!i]
+  }
+  i <- weights <= 0         # nwe: kill negative and zero weights and associated data
+  if (any(i)) {
+    x <- x[!i]
+    weights <- weights[!i]
+  }
+  if (type == "quantile") {
+    if(sum(weights) < 1000000 ) {weights<- weights*1000000/sum(weights)}  ##### new
+    w <- wtd.table(x, weights, na.rm = na.rm, normwt = normwt,
+                   type = "list")
+    x <- w$x
+    wts <- w$sum.of.weights
+    n <- sum(wts)
+    order <- 1 + (n - 1) * probs
+    low <- pmax(floor(order), 1)
+    high <- pmin(low + 1, n)
+    order <- order%%1
+    allq <- approx(cumsum(wts), x, xout = c(low, high), method = "constant",
+                   f = 1, rule = 2)$y
+    k <- length(probs)
+    quantiles <- (1 - order) * allq[1:k] + order * allq[-(1:k)]
+    names(quantiles) <- nams
+    return(quantiles)
+  }
+  w <- wtd.Ecdf(x, weights, na.rm = na.rm, type = type, normwt = normwt)
+  structure(approx(w$ecdf, w$x, xout = probs, rule = 2)$y,
+            names = nams)
+}
+
+
+
+
+wtd.table<- function (x, weights = NULL, type = c("list", "table"), normwt = FALSE,
+                      na.rm = TRUE) {
+  # Function taken from HMISC, but issue solved which is documented here: https://github.com/harrelfe/Hmisc/issues/97#issuecomment-429634634
+  p_load(timeDate)
+  type <- match.arg(type)
+  if (!length(weights))
+    weights <- rep(1, length(x))
+  isdate <- ( class(x)[1]=="Date"  | class(x)[1]=="POSIXct") ### MODIFIED
+  ax <- attributes(x)
+  ax$names <- NULL
+  if (is.character(x))
+    x <- as.factor(x)
+  lev <- levels(x)
+  x <- unclass(x)
+  if (na.rm) {
+    s <- !is.na(x + weights)
+    x <- x[s, drop = FALSE]
+    weights <- weights[s]
+  }
+  n <- length(x)
+  if (normwt)
+    weights <- weights * length(x)/sum(weights)
+  i <- order(x)
+  x <- x[i]
+  weights <- weights[i]
+  if (anyDuplicated(x)) {
+    weights <- tapply(weights, x, sum)
+    if (length(lev)) {
+      levused <- lev[sort(unique(x))]
+      if ((length(weights) > length(levused)) && any(is.na(weights)))
+        weights <- weights[!is.na(weights)]
+      if (length(weights) != length(levused))
+        stop("program logic error")
+      names(weights) <- levused
+    }
+    if (!length(names(weights)))
+      stop("program logic error")
+    if (type == "table")
+      return(weights)
+    #x <-  all.is.numeric(names(weights), "vector")#  modified: commented out. function checked whether all are numeric and if yes returned the weights
+    if (isdate)      attributes(x) <- c(attributes(x), ax)
+    x_out<- as.numeric(names(weights))
+    names(weights) <- NULL
+    return(list(x = x_out, sum.of.weights = weights))
+  }
+  xx <- x
+  if (isdate)
+    attributes(xx) <- c(attributes(xx), ax)
+  if (type == "list")
+    list(x = if (length(lev)) lev[x] else xx, sum.of.weights = weights)
+  else {
+    names(weights) <- if (length(lev))
+      lev[x]
+    else xx
+    weights
+  }
+}
+
+wtd.mean <- function (x, weights = NULL, normwt = "ignored", na.rm = TRUE) {
+  # Function taken from HMISC, but issue solved which is documented here: https://github.com/harrelfe/Hmisc/issues/97#issuecomment-429634634
+  if (!length(weights))
+    return(mean(x, na.rm = na.rm))
+  if (na.rm) {
+    s <- !is.na(x + weights)
+    x <- x[s]
+    weights <- weights[s]
+  }
+  sum(weights * x)/sum(weights)
+}
+
+
+```
+
+
+
+# CPS Cleaning
+
+(Taken from "CPS_QP_Clean.Rmd")
+
+## Notes on SQLite
+
+Because the data file is so large, I decided to access it as an SQLite database, instead of loading it into memory.
+
+Information on this is below.
+
+*NOTE: In the future, when I understand SQL, I should rewrite the code, as I could more easily extract just the outgoing groups (which requires loading the database with "integer" columns) in SQL, and leave other stuff to R. For now, I will be doing it in dplyr.
+
+## RSQLite Code
+
+```{r eval=TRUE, evalSetup}
+
+# This code establishes a connection with my database
+# See: https://data.library.virginia.edu/creating-a-sqlite-database-for-use-with-r/
+
+con <- dbConnect(RSQLite::SQLite(), here("data/IPUMS_CPS/cps_master.db"))
+
+# This allows dplyr to use the connection like an object:
+
+cpsALL <- tbl(con, "cpsALL")
+
+```
+
+### Disconnect SQLite
+
+Run this code to disconnect from the database
+
+```{r eval=FALSE}
+
+dbDisconnect(con)
+
+```
+
+### CPI99
+
+When downloading from IPUMS, I forgot to download the CPI99 variable, which enables easy conversion into 1999 dollars. Instead, I have gotten the values of CPI99 for each year, and put them in a separate csv, which I will join with the total data set.
+
+CPI99 values: https://cps.ipums.org/cps/cpi99.shtml
+
+I will create inflation adjusted variables in sections below.
+
+```{r eval=TRUE, evalSetup}
+
+CPIdata <- read_csv(here("data/CPI99_1990.csv"))
+
+```
+
+
+## Data Set up
+
+Seems like Kristal 2017 uses 90/10 ratio as measure of inequality
+
+WARNING: EPI argue that you need to bin before using quantiles, since wages clump at certain values: https://www.epi.org/data/methodology/ (see "Wage Percentiles" section)
+
+
+```{r eval=TRUE, evalSetup}
+
+# Create ORG Microdata
+
+# list of variables:
+
+cpsORG <- cpsALL %>% 
+  filter(ELIGORG == 1, between(CLASSWKR, 20, 28)) %>% 
+  mutate(unionMEM = if_else(UNION == 2, 1, 0),
+         manager = if_else(OCC2010 >= 10 & OCC2010 <= 430, 1, 0),
+         EARNWEEK2 = if_else(EARNWEEK >= 9999, NA_integer_,
+                             if_else(EARNWEEK > 1923, 1923, EARNWEEK)),
+         HOURWAGE2 = if_else(HOURWAGE != 999.99, HOURWAGE, NA_integer_),
+         UHRSWORK1_2 = if_else(UHRSWORK1 == 999 | UHRSWORK1 == 997 | UHRSWORK1 == 0, NA_integer_, UHRSWORK1),
+         hrWAGE2 = if_else(PAIDHOUR == 2, HOURWAGE2,
+                           if_else(PAIDHOUR == 1, (EARNWEEK2 / UHRSWORK1_2), NA_integer_))) %>% 
+  filter(hrWAGE2 > 1, UHRSWORK1_2 > 16) %>% 
+  mutate(mgmtWAGE = if_else(manager == 1, hrWAGE2, NA_integer_),
+         NONmgmtWAGE = if_else(manager == 0, hrWAGE2, NA_integer_),
+         ln_hrWAGE2 = log(hrWAGE2),
+         ln_mgmtWAGE = log(mgmtWAGE),
+         ln_NONmgmtWAGE = log(NONmgmtWAGE)
+         ) %>% 
+  select(ELIGORG, YEAR, unionMEM, manager, HOURWAGE2, UHRSWORK1_2, hrWAGE2, PAIDHOUR, IND1990, OCC2010, EARNWT, mgmtWAGE, NONmgmtWAGE, ln_hrWAGE2, ln_mgmtWAGE, ln_NONmgmtWAGE) %>% 
+  collect()
+
+## view(head(cpsORG, 300))
+
+
+# Another way to check:
+
+## cpsCHECK <- slice_sample(cpsORG, n = 100) %>% collect()
+
+# Checking on the WKSWORKORG variable - since my "head" has a lot of "1" weeks worked...
+
+## wksCOUNT <- cpsORG %>% count(WKSWORKORG) %>% collect()
+
+# NOTE: Looks like it's all good - most people either work 52 weeks a year, or are 0 (not in universe)
+  
+# Add CPI99 inflation information
+
+cpsORG <- cpsORG %>% inner_join(CPIdata, by = "YEAR") %>% 
+  mutate(INFLhrWAGE2 = hrWAGE2*CPI99,
+         inflNMwage = ifelse(manager == 0, INFLhrWAGE2, NA_integer_))
+
+# Create Industry Panel
+
+cpsDATA <- group_by(cpsORG, IND1990, YEAR)
+
+cpsDATA <- summarise(cpsDATA, 
+                     TotEMP = (sum(EARNWT, na.rm = TRUE)/12),
+                     unionEMP = (sum(EARNWT * unionMEM, na.rm = TRUE)/12),
+                     mgmtEMP = (sum(EARNWT * manager, na.rm = TRUE)/12), 
+                     avgWAGE = weighted.mean(hrWAGE2, EARNWT, na.rm = TRUE),
+                     NONmgmtAVG = weighted.mean(NONmgmtWAGE, EARNWT, na.rm = TRUE),
+                     mgmtAVG = weighted.mean(mgmtWAGE, EARNWT, na.rm = TRUE),
+                     ln_avgWAGE = weighted.mean(ln_hrWAGE2, EARNWT, na.rm = TRUE),
+                     ln_NONmgmtAVG = weighted.mean(ln_NONmgmtWAGE, EARNWT, na.rm = TRUE),
+                     ln_mgmtAVG = weighted.mean(ln_mgmtWAGE, EARNWT, na.rm = TRUE),
+                     var_wages = wtd.var(ln_hrWAGE2, EARNWT, na.rm = TRUE),
+                     #Wage90 = wtd.quantile(hrWAGE2, EARNWT, probs = .9, na.rm = TRUE),
+                     #Wage10 = wtd.quantile(hrWAGE2, EARNWT, probs = .1, na.rm = TRUE),
+                     Wage90 = quantile(hrWAGE2, probs = .9, na.rm = TRUE),
+                     Wage10 = quantile(hrWAGE2, probs = .1, na.rm = TRUE),
+                     INFLavgWAGE = weighted.mean(INFLhrWAGE2, EARNWT, na.rm = TRUE),
+                     inflNMavg = weighted.mean(inflNMwage, EARNWT, na.rm = TRUE))
+
+cpsDATA <- ungroup(cpsDATA)
+
+# Drop big ole data set
+
+rm(cpsORG)
+
+
+# Create New Variables
+
+cpsDATA <- cpsDATA %>% 
+  mutate(pctUNION = (unionEMP / TotEMP)*100,
+         mgmtRATIO = (mgmtEMP / TotEMP)*100,
+         ratio90_10 = (Wage90 / Wage10),
+         log90_10 = log(Wage90 / Wage10),
+         sd_wages = sqrt(var_wages),
+         mgmtWAGEratio = mgmtAVG / NONmgmtAVG,
+         log_mWr = log(mgmtAVG / NONmgmtAVG))
+
+
+
+```
+
+#### Filter Industries
+
+Per Kristal & Cohen 2017 - exclude government industries (unlike them, I will be leaving healthcare in), and agriculture
+
+- 000 NIU
+- 010-032 Agriculture etc
+- 842-860 - Schools, Libraries, Educational services
+- 873 - Labor Unions
+- 412 US Postal Service
+- 900's - lots of govt.
+
+Outlier Industries
+
+- 782 - very small (emp ~5k) with high unionization - get rid of
+
+
+```{r eval=TRUE, evalSetup}
+
+cpsDATA <- cpsDATA %>% 
+  filter(IND1990 != 873 & IND1990 != 782 & IND1990 != 412 & IND1990 > 32 & IND1990 < 900) %>% 
+  filter(IND1990 < 842 | IND1990 > 860)
+  
+
+```
+
+# 3 Year Averages
+
+NOTE: The way you did it isn't great - it would be better if it was attached to the full data set. Go back to the tabs you have open in Chrome.
+
+```{r eval=FALSE}
+
+#cps3yr <- cpsDATA[complete.cases(cpsDATA), ]
+
+cps3yr <- cpsDATA %>% 
+  mutate(period = cut(cpsDATA$YEAR, seq(1990,2019,by=3), right=F)) %>% 
+  group_by(IND1990, period) %>% summarise(avg9010 = mean(log90_10))
+
+```
+
+# Union pct Wide style
+
+Creating time variables (wide style for lavaan) with 3-year averages of union percentage.
+
+## Time Invariant
+
+### Starting Union Pct
+
+The starting percentage of unionization. 3 year average of 1990-1992
+
+```{r eval = TRUE}
+
+cps_1union <- cpsDATA %>% 
+  group_by(IND1990) %>% 
+  filter(YEAR <= 1993) %>% 
+  summarise(union1 = mean(pctUNION))
+
+```
+
+
+### Delta Union Pct
+
+End period union pct - start period.
+
+End Period:
+
+```{r eval = TRUE}
+
+cps_LASTunion <- cpsDATA %>% 
+  group_by(IND1990) %>% 
+  filter(YEAR >= 2017) %>% 
+  summarise(unionLAST = mean(pctUNION))
+
+```
+
+Delta:
+
+```{r eval = TRUE}
+
+cps_DELTAunion <- cps_1union %>% inner_join(cps_LASTunion, by = "IND1990")
+
+cps_DELTAunion <- cps_DELTAunion %>% mutate(DELTAunion = unionLAST - union1)
+
+# Export
+
+saveRDS(cps_DELTAunion, file = "cps_DELTAunion.rds")
+
+```
+
+Grand Mean Centered:
+
+```{r eval = TRUE}
+
+cps_DELTAunion$uni1.c <- cps_DELTAunion$union1 - mean(cps_DELTAunion$union1)
+
+cps_DELTAunion$DLTuni.c <- cps_DELTAunion$DELTAunion - mean(cps_DELTAunion$DELTAunion)
+
+```
+
+With Interaction
+
+```{r eval = TRUE}
+
+cps_DELTAunion <- cps_DELTAunion %>% 
+  mutate(uniINT = uni1.c*DLTuni.c)
+
+```
+
+
+
+# Reshape Data
+
+For Latent Growth Curve model, the data must be *wide*.
+
+```{r eval = TRUE}
+
+cpsWIDE <- cpsDATA %>% 
+  mutate(inqYEAR = str_c("inq", YEAR)) %>% 
+  select(IND1990, inqYEAR, log90_10) %>% 
+  pivot_wider(names_from = inqYEAR, values_from = log90_10)
+
+# Only Complete Cases
+
+cpsWIDE <- cpsWIDE[complete.cases(cpsWIDE), ]
+
+```
+
+## 90/10 Ratio Reshape
+
+Trying out the un-logged ratio - so I get bigger parameters.
+
+```{r eval = TRUE}
+
+cpsRATIO_9010 <- cpsDATA %>% 
+  mutate(inqYEAR = str_c("inq", YEAR)) %>% 
+  select(IND1990, inqYEAR, ratio90_10) %>% 
+  pivot_wider(names_from = inqYEAR, values_from = ratio90_10)
+
+# Only Complete Cases
+
+cpsRATIO_9010 <- cpsRATIO_9010[complete.cases(cpsRATIO_9010), ]
+
+```
+
+
+## INFL Average Wages NO
+
+NOTE: this was no longer an issue after I recoded the data set up to clean the data better.
+
+Average wage by industry - inflated
+
+```{r eval = TRUE}
+
+cpsINFLavg <- cpsDATA %>% 
+  mutate(inqYEAR = str_c("inq", YEAR)) %>% 
+  select(IND1990, inqYEAR, INFLavgWAGE) %>% 
+  pivot_wider(names_from = inqYEAR, values_from = INFLavgWAGE)
+
+# Only Complete Cases
+
+cpsINFLavg <- cpsINFLavg[complete.cases(cpsINFLavg), ]
+
+```
+
+### IND 420 & 650
+
+Industry 420 in 2005 has a radically higher value for average infl wage than adjoining years:
+2004 = 16.8
+2005 = 69.01
+2006 = 16.12
+
+Same for Industry 650
+2004 = 11.73
+2005 = 31.4
+2006 = 12.8
+
+I am going to replace both of these 2005 values with average of 2004 and 2006:
+
+```{r eval = FALSE}
+
+cpsINFLavg <- as.data.frame(cpsINFLavg)
+
+bad2005 <- which(cpsINFLavg$IND1990 == 420 | cpsINFLavg$IND1990 == 650)
+
+cpsINFLavg[bad2005, 'inq2005'] <- (cpsINFLavg[bad2005, 'inq2004'] + cpsINFLavg[bad2005, 'inq2006'])/2
+
+```
+
+'((cpsINFLavg[cpsINFLavg$IND1990 == 420, cpsINFLavg$inq2004]) + (cpsINFLavg[cpsINFLavg$IND1990 == 420, cpsINFLavg$inq2006]))/2'
+
+## W/ Covariates
+
+Log 90/10
+
+```{r eval = TRUE}
+
+cpsln_9010_full <- cpsWIDE %>% inner_join(cps_DELTAunion, by = "IND1990") %>% 
+  select(-(32:34))
+
+```
+
+90/10 Ratio
+
+```{r eval = TRUE}
+
+cps_9010_full <- cpsRATIO_9010 %>% inner_join(cps_DELTAunion, by = "IND1990") %>% 
+  select(-(32:34))
+
+```
+
+Avg INFL wage
+
+```{r eval = TRUE}
+
+cps_INFLavg_full <- cpsINFLavg %>% inner_join(cps_DELTAunion, by = "IND1990") %>% 
+  select(-(32:34))
+
+```
+
+# Data Notes
+
+## Logged 90 10
+
+I was using the logged 90/10 ratio because it was used in prior lit. But this article has a good note on it: https://fraser.stlouisfed.org/files/docs/historical/frbrich/econbrief/frbrich_eb_08-02.pdf
+
+"3 Technically, the ratios in this analysis are compared in their logarithmic form. The log of a ratio of two values is equal to the difference of the logs of these values. That allows for an easy analysis of the approximate percentage change between these ratios. For instance, an increase in the log 90-10 ratio from 0.10 to 0.15 implies that the worker in the 90th percentile went from making approximately 10 percent more than the worker in the 10th percentile to making approximately 15 percent more."
+
+# Year List
+
+```{r eval = FALSE}
+
+# Format Coefficient List
+
+  #year_names <- as.vector(colnames(cpsWIDE[ , -1]))
+
+year_num <- as.vector(seq(1990, 2019, by=1))
+
+year_num <- str_c("inq", year_num)
+
+time_prefix <- as.vector(seq(0, 29, by=1))
+
+year_prefix <- str_c(time_prefix, year_num, sep = "*")
+
+slope_var <- paste(year_prefix, collapse = " + ")
+
+print(slope_var)
+
+rm(year_num, time_prefix, year_prefix, slope_var)
+
+```
+
+```{r eval = FALSE}
+
+# Format Coefficient List
+
+year_num <- as.vector(seq(1990, 2019, by=1))
+
+year_num <- str_c("inq", year_num)
+
+year_prefix <- str_c("1", year_num, sep = "*")
+
+intercept_var <- paste(year_prefix, collapse = " + ")
+
+print(intercept_var)
+
+rm(year_num, year_prefix, intercept_var)
+
+```
+
+```{r eval = FALSE}
+
+year_num <- as.vector(seq(1990, 2019, by=1))
+
+year_num <- str_c("inq", year_num)
+
+r_year <- str_c("r*", year_num)
+
+var_years <- str_c(year_num, " ~~ ", r_year)
+
+var_years <- str_c(var_years, collapse = "\n")
+
+cat(var_years)
+
+rm(year_num, r_year, var_years)
+
+```
+
+
+# Lavaan Models
+
+##(05-21-2022)
+
+I am starting with an unconstrained model (see lecture "10 Latent Growth Curve Modeling", slide 76). In the lecture, the professor built up to this, so maybe for the project I should go back and build up to it.
+
+This is the model which lets most things be freely estimated.
+
+## Model 1
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model1.9010 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1991 + 1*inq1992 + 1*inq1993 + 1*inq1994 + 1*inq1995 + 1*inq1996 + 1*inq1997 + 1*inq1998 + 1*inq1999 + 1*inq2000 + 1*inq2001 + 1*inq2002 + 1*inq2003 + 1*inq2004 + 1*inq2005 + 1*inq2006 + 1*inq2007 + 1*inq2008 + 1*inq2009 + 1*inq2010 + 1*inq2011 + 1*inq2012 + 1*inq2013 + 1*inq2014 + 1*inq2015 + 1*inq2016 + 1*inq2017 + 1*inq2018 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 1*inq1991 + 2*inq1992 + 3*inq1993 + 4*inq1994 + 5*inq1995 + 6*inq1996 + 7*inq1997 + 8*inq1998 + 9*inq1999 + 10*inq2000 + 11*inq2001 + 12*inq2002 + 13*inq2003 + 14*inq2004 + 15*inq2005 + 16*inq2006 + 17*inq2007 + 18*inq2008 + 19*inq2009 + 20*inq2010 + 21*inq2011 + 22*inq2012 + 23*inq2013 + 24*inq2014 + 25*inq2015 + 26*inq2016 + 27*inq2017 + 28*inq2018 + 29*inq2019
+  
+'
+
+fit1.9010 <- growth(model1.9010, data = cpsWIDE)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit1.9010, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+### Modification Indices
+
+```{r eval = FALSE}
+
+modificationIndices(fit1.9010, sort = TRUE)
+
+```
+
+### semPlot
+
+```{r eval = FALSE}
+
+semPaths(object = fit1.9010)
+
+```
+
+
+## Model 2
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model2.9010 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1991 + 1*inq1992 + 1*inq1993 + 1*inq1994 + 1*inq1995 + 1*inq1996 + 1*inq1997 + 1*inq1998 + 1*inq1999 + 1*inq2000 + 1*inq2001 + 1*inq2002 + 1*inq2003 + 1*inq2004 + 1*inq2005 + 1*inq2006 + 1*inq2007 + 1*inq2008 + 1*inq2009 + 1*inq2010 + 1*inq2011 + 1*inq2012 + 1*inq2013 + 1*inq2014 + 1*inq2015 + 1*inq2016 + 1*inq2017 + 1*inq2018 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 1*inq1991 + 2*inq1992 + 3*inq1993 + 4*inq1994 + 5*inq1995 + 6*inq1996 + 7*inq1997 + 8*inq1998 + 9*inq1999 + 10*inq2000 + 11*inq2001 + 12*inq2002 + 13*inq2003 + 14*inq2004 + 15*inq2005 + 16*inq2006 + 17*inq2007 + 18*inq2008 + 19*inq2009 + 20*inq2010 + 21*inq2011 + 22*inq2012 + 23*inq2013 + 24*inq2014 + 25*inq2015 + 26*inq2016 + 27*inq2017 + 28*inq2018 + 29*inq2019
+  
+# Slope variance
+
+Ls ~~ a*Ls
+  
+'
+
+fit2.9010 <- growth(model2.9010, data = cpsWIDE)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit2.9010, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+## Model 3
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model3.9010 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1991 + 1*inq1992 + 1*inq1993 + 1*inq1994 + 1*inq1995 + 1*inq1996 + 1*inq1997 + 1*inq1998 + 1*inq1999 + 1*inq2000 + 1*inq2001 + 1*inq2002 + 1*inq2003 + 1*inq2004 + 1*inq2005 + 1*inq2006 + 1*inq2007 + 1*inq2008 + 1*inq2009 + 1*inq2010 + 1*inq2011 + 1*inq2012 + 1*inq2013 + 1*inq2014 + 1*inq2015 + 1*inq2016 + 1*inq2017 + 1*inq2018 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 1*inq1991 + 2*inq1992 + 3*inq1993 + 4*inq1994 + 5*inq1995 + 6*inq1996 + 7*inq1997 + 8*inq1998 + 9*inq1999 + 10*inq2000 + 11*inq2001 + 12*inq2002 + 13*inq2003 + 14*inq2004 + 15*inq2005 + 16*inq2006 + 17*inq2007 + 18*inq2008 + 19*inq2009 + 20*inq2010 + 21*inq2011 + 22*inq2012 + 23*inq2013 + 24*inq2014 + 25*inq2015 + 26*inq2016 + 27*inq2017 + 28*inq2018 + 29*inq2019
+  
+# No Manifest Variances
+
+inq1990 ~~ r*inq1990
+inq1991 ~~ r*inq1991
+inq1992 ~~ r*inq1992
+inq1993 ~~ r*inq1993
+inq1994 ~~ r*inq1994
+inq1995 ~~ r*inq1995
+inq1996 ~~ r*inq1996
+inq1997 ~~ r*inq1997
+inq1998 ~~ r*inq1998
+inq1999 ~~ r*inq1999
+inq2000 ~~ r*inq2000
+inq2001 ~~ r*inq2001
+inq2002 ~~ r*inq2002
+inq2003 ~~ r*inq2003
+inq2004 ~~ r*inq2004
+inq2005 ~~ r*inq2005
+inq2006 ~~ r*inq2006
+inq2007 ~~ r*inq2007
+inq2008 ~~ r*inq2008
+inq2009 ~~ r*inq2009
+inq2010 ~~ r*inq2010
+inq2011 ~~ r*inq2011
+inq2012 ~~ r*inq2012
+inq2013 ~~ r*inq2013
+inq2014 ~~ r*inq2014
+inq2015 ~~ r*inq2015
+inq2016 ~~ r*inq2016
+inq2017 ~~ r*inq2017
+inq2018 ~~ r*inq2018
+inq2019 ~~ r*inq2019
+  
+'
+
+fit3.9010 <- growth(model3.9010, data = cpsWIDE)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit3.9010, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+# Model 1.4 - Fewer years
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model1.4.9010 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+'
+
+fit1.4.9010 <- growth(model1.4.9010, data = cpsWIDE)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit1.4.9010, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+### Ls variance
+
+```{r eval = FALSE}
+
+#coef1.4 <- coef(fit1.4.9010)
+
+EST_fit1.4 <- parameterestimates(fit1.4.9010)
+
+#lavInspect(fit1.4.9010, what = "vcov")
+
+ls_fit1.4 <- as.tibble(EST_fit1.4[23,])
+
+print(ls_fit1.4)
+
+```
+
+### Modification Indices
+
+```{r eval = FALSE}
+
+modificationIndices(fit1.4.9010, sort = TRUE)
+
+```
+
+# Model 5 - Slope Variance label
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model5.9010 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+# Slope variance
+
+  Ls ~~ a*Ls
+  
+'
+
+fit5.9010 <- growth(model5.9010, data = cpsWIDE)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit5.9010, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+# Model 6 - Fix residual variances
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model6.9010 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+# Fix residual variances
+
+inq1990 ~~ r*inq1990
+inq1995 ~~ r*inq1995
+inq2000 ~~ r*inq2000
+inq2010 ~~ r*inq2010
+inq2015 ~~ r*inq2015
+inq2019 ~~ r*inq2019
+  
+'
+
+fit6.9010 <- growth(model6.9010, data = cpsWIDE)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit6.9010, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+# Model 2.1 - 90/10 Ratio
+
+Not logging the 90/10 ratio - so I get bigger numbers.
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model2.1.9010 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+'
+
+fit2.1.9010 <- growth(model2.1.9010, data = cpsRATIO_9010)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit2.1.9010, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+### Ls variance
+
+```{r eval = FALSE}
+
+EST_fit2.1 <- parameterestimates(fit2.1.9010)
+
+ls_fit2.1 <- as.tibble(EST_fit2.1[23,])
+
+print(ls_fit2.1)
+
+```
+
+# Model 3.1 - Average Wages (Inflated)
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model3.1.avgINFL <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+'
+
+fit3.1.avgINFL <- growth(model3.1.avgINFL, data = cpsINFLavg)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit3.1.avgINFL, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+# Model 4 Covariates
+
+## Model 4.1 Union1
+
+Union density at beginning of period
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model4.1 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+# regression
+
+  Li + Ls ~ uni1.c
+'
+
+fit4.1 <- growth(model4.1, data = cpsln_9010)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit4.1, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+### Ls variance
+
+```{r eval = FALSE}
+
+#coef1.4 <- coef(fit1.4.9010)
+
+EST_fit4.1 <- parameterestimates(fit4.1)
+
+#lavInspect(fit1.4.9010, what = "vcov")
+
+ls_fit4.1 <- as.tibble(EST_fit4.1[23,])
+
+print(ls_fit4.1)
+
+```
+
+## Model 4.2 Union Delta
+
+Change in union density
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model4.2 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+# regression
+
+  Li + Ls ~ DLTuni.c
+'
+
+fit4.2 <- growth(model4.2, data = cpsln_9010)
+
+```
+
+```{r eval = FALSE}
+
+summary(fit4.2, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+## Model 4.3 Two union variables
+
+Change in union density
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model4.3 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+# regression
+
+  Li + Ls ~ uni1.c + DLTuni.c
+'
+
+fit4.3 <- growth(model4.3, data = cpsln_9010)
+
+```
+
+```{r eval = FALSE}
+
+summary(fit4.3, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+## Model 4.4 Interaction
+
+Change in union density
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model4.4 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+# regression
+
+  Li + Ls ~ uni1.c + DLTuni.c + uniINT
+'
+
+fit4.4 <- growth(model4.4, data = cpsln_9010)
+
+```
+
+```{r eval = FALSE}
+
+summary(fit4.4, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+# Model 5 Ratio Covariates
+
+Covariates using 90/10 Ratio
+
+## Model 5.1 Union1
+
+Union density at beginning of period
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model5.1 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+# regression
+
+  Li + Ls ~ uni1.c
+'
+
+fit5.1 <- growth(model5.1, data = cps_9010)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit5.1, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+## Model 5.5 Union1
+
+Union density at beginning of period
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model5.5 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+# regression
+
+  Li ~ uni1.c
+  Ls ~ DLTuni.c
+'
+
+fit5.5 <- growth(model5.5, data = cps_9010)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit5.5, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+# Model 6.1 - Average Wages (Inflated) w/ covariates
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model6.1 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+# regression
+
+  Li + Ls ~ uni1.c
+  
+'
+
+fit6.1 <- growth(model6.1, data = cps_INFLavg)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit6.1, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+## Model 6.2 - Average Wages (Inflated) w/ covariates
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model6.2 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+# regression
+
+  Li + Ls ~ DLTuni.c
+  
+'
+
+fit6.2 <- growth(model6.2, data = cps_INFLavg)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit6.2, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+## Model 6.3 - Average Wages (Inflated) w/ covariates
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model6.3 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+# regression
+
+  Li + Ls ~  uni1.c + DLTuni.c
+  
+'
+
+fit6.3 <- growth(model6.3, data = cps_INFLavg)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit6.3, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+## Model 6.5 - Average Wages (Inflated) w/ covariates
+
+```{r eval = FALSE}
+
+# Specify Model
+
+model6.5 <- '
+# intercept
+  Li =~ 1*inq1990 + 1*inq1995 + 1*inq2000 + 1*inq2005 + 1*inq2010 + 1*inq2015 + 1*inq2019
+
+# slope
+  Ls =~ 0*inq1990 + 5*inq1995 + 10*inq2000 + 15*inq2005 + 20*inq2010 + 25*inq2015 + 29*inq2019
+  
+# regression
+
+  Li ~ uni1.c
+  Ls ~ DLTuni.c
+  
+'
+
+fit6.5 <- growth(model6.5, data = cps_INFLavg)
+
+```
+
+
+```{r eval = FALSE}
+
+summary(fit6.5, rsquare = TRUE, standardized = TRUE, ci = TRUE, fit.measures = TRUE)
+
+```
+
+# Export
+
+```{r eval = FALSE}
+
+# Export to look at in excel
+
+write_csv(cpsDATA, "cps_90-2019.csv")
+
+```
+
+## For Analysis
+
+```{r eval = FALSE}
+
+# Log 90/10 Ratio
+
+write_csv(cpsln_9010, "cpsln_9010.csv")
+
+```
+
+```{r eval = FALSE}
+
+# 90/10 Ratio
+
+write_csv(cps_9010, "cps_9010.csv")
+
+```
+
+```{r eval = FALSE}
+
+# 90/10 Ratio
+
+write_csv(cps_INFLavg, "cps_INFLavg.csv")
+
+```
+
+## RDS Export
+
+### Just Time Variables
+
+```{r eval = FALSE}
+
+# Log 90/10 Ratio
+
+saveRDS(cpsWIDE, file = "cpsln_9010.rds")
+
+```
+
+```{r eval = FALSE}
+
+# 90/10 Ratio
+
+saveRDS(cpsRATIO_9010, file = "cps_9010.rds")
+
+```
+
+```{r eval = FALSE}
+
+# 90/10 Ratio
+
+saveRDS(cpsINFLavg, file = "cps_INFLavg.rds")
+
+```
+
+### Full
+
+```{r eval = FALSE}
+
+# Log 90/10 Ratio
+
+saveRDS(cpsln_9010_full, file = "cpsln_9010_full.rds")
+
+```
+
+```{r eval = FALSE}
+
+# 90/10 Ratio
+
+saveRDS(cps_9010_full, file = "cps_9010_full.rds")
+
+```
+
+```{r eval = FALSE}
+
+# Inflation-Adjusted Average Wages
+
+saveRDS(cps_INFLavg_full, file = "cps_INFLavg_full.rds")
+
+```
+
+# Worksheet
+
+```{r eval = FALSE}
+
+cpsORG %>% summarise(
+  maxwage = max(hrWAGE2),
+  pt99 = quantile(hrWAGE2, probs = .999),
+  nas = sum(is.na(UHRSWORK1_2))
+)
+
+cpsORG %>% slice_max(hrWAGE2, n = 10)
+
+cpsORG %>% slice_min(UHRSWORK1_2, n = 10)
+
+sum(cpsORG$UHRSWORK1_2 <= 16, na.rm=TRUE)
+
+describe(cpsORG$hrWAGE2)
+
+describe(cpsORG$UHRSWORK1_2)
+
+cpsORG %>% summarise(
+  maxwage = max(hrWAGE2),
+  pt99 = quantile(UHRSWORK1_2, probs = .01, na.rm = TRUE)
+)
+
+
+```
+
+
