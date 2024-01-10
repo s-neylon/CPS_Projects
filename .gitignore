@@ -9,6 +9,13 @@
 *.xls
 *.xlsx
 
+# No Shapefiles
+*.dbf
+*.prj
+*.shp
+*.kmz
+*.shx
+
 # SQLite databases
 
 *.db
